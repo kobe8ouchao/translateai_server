@@ -1,7 +1,6 @@
 # from openai import OpenAI
 # import base64
 
-# client = OpenAI(api_key="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")
 
 # def encode_image(image_path):
 #     with open(image_path, "rb") as image_file:
