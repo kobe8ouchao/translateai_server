@@ -70,6 +70,11 @@ def after_request(resp):
 def create_app():
     # 修改MongoDB连接
     mongo_uri = os.getenv('MONGO_URI', 'mongodb://localhost:27017/translateai?authSource=admin')
+    # 从URI中提取数据库名称
+    import urllib.parse
+    parsed_uri = urllib.parse.urlparse(mongo_uri)
+    db_name = parsed_uri.path.strip('/') if parsed_uri.path else 'translateai'
+    print(f"连接数据库: {db_name}")
     
     # 尝试连接MongoDB，最多重试5次
     max_retries = 5

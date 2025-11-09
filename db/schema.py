@@ -52,6 +52,16 @@ class User(BaseDocument):
     vip_expired_at = DateTimeField()  # 会员过期时间
     created_at = DateTimeField(default=datetime.datetime.now)
     updated_at = DateTimeField(default=datetime.datetime.now)
+    
+    meta = {
+        'db_alias': 'default',
+        'collection': 'users',
+        'indexes': [
+            'name',
+            'email',
+            'platform'
+        ]
+    }
 
 class UserFile(BaseDocument):
     user = ReferenceField(User, required=True)
@@ -65,6 +75,8 @@ class UserFile(BaseDocument):
     updated_at = DateTimeField(default=datetime.datetime.now)
 
     meta = {
+        'db_alias': 'default',
+        'collection': 'user_files',
         'indexes': [
             'user',
             'filename',
@@ -84,4 +96,26 @@ class Order(Document):
     created_at = DateTimeField(default=datetime.datetime.now)
     paid_at = DateTimeField()
     trade_no = StringField()  # 支付宝交易号
+    
+    meta = {
+        'db_alias': 'default',
+        'collection': 'orders',
+        'indexes': [
+            'user',
+            'order_no',
+            'status',
+            'created_at'
+        ]
+    }
+    
+    meta = {
+        'db_alias': 'default',
+        'collection': 'orders',
+        'indexes': [
+            'user',
+            'order_no',
+            'status',
+            'created_at'
+        ]
+    }
 
