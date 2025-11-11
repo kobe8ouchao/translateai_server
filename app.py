@@ -76,21 +76,6 @@ def create_app():
     db_name = parsed_uri.path.strip('/') if parsed_uri.path else 'translateai'
     print(f"连接数据库: {db_name}")
     
-    # 添加连接池和超时配置
-    # 如果是MongoDB Atlas连接，添加SSL和重试配置
-    if 'mongodb+srv' in mongo_uri:
-        # Atlas连接需要SSL和重试配置
-        if '?' not in mongo_uri:
-            mongo_uri += '?'
-        mongo_uri += '&retryWrites=true&w=majority&ssl=true&ssl_cert_reqs=CERT_NONE'
-    else:
-        # 普通连接添加连接池配置
-        if '?' not in mongo_uri:
-            mongo_uri += '?'
-        else:
-            mongo_uri += '&'
-        mongo_uri += 'maxPoolSize=10&minPoolSize=2&maxIdleTimeMS=30000&socketTimeoutMS=30000&connectTimeoutMS=10000'
-    
     # 尝试连接MongoDB，最多重试5次
     max_retries = 5
     retry_count = 0
@@ -102,18 +87,7 @@ def create_app():
             # 断开任何现有连接
             disconnect()
             # 使用register_connection替代connect以便在应用程序中持久保持连接
-            register_connection(
-                alias='default', 
-                host=mongo_uri, 
-                connect=True,
-                # 添加连接选项
-                maxPoolSize=10,
-                minPoolSize=2,
-                maxIdleTimeMS=30000,
-                socketTimeoutMS=30000,
-                connectTimeoutMS=10000,
-                serverSelectionTimeoutMS=10000
-            )
+            register_connection(alias='default', host=mongo_uri, connect=True)
             print("MongoDB连接成功")
             connection_success = True
         except Exception as e:
@@ -124,43 +98,6 @@ def create_app():
                 time.sleep(5)
             else:
                 print("达到最大重试次数，无法连接MongoDB")
-                # 即使连接失败，也继续创建应用，但记录错误
-                import traceback
-                print(f"详细错误信息: {traceback.format_exc()}")
-    
-    # 添加数据库连接检查装饰器
-    def ensure_db_connection(func):
-        def wrapper(*args, **kwargs):
-            try:
-                # 检查连接是否有效
-                from mongoengine import get_connection
-                conn = get_connection('default')
-                # 尝试执行一个简单的查询来验证连接
-                conn.admin.command('ping')
-                return func(*args, **kwargs)
-            except Exception as e:
-                print(f"数据库连接失效，尝试重新连接: {str(e)}")
-                # 重新连接
-                try:
-                    disconnect()
-                    register_connection(
-                        alias='default', 
-                        host=mongo_uri, 
-                        connect=True,
-                        maxPoolSize=10,
-                        minPoolSize=2,
-                        maxIdleTimeMS=30000,
-                        socketTimeoutMS=30000,
-                        connectTimeoutMS=10000,
-                        serverSelectionTimeoutMS=10000
-                    )
-                    print("数据库重新连接成功")
-                    return func(*args, **kwargs)
-                except Exception as reconnect_error:
-                    print(f"数据库重新连接失败: {str(reconnect_error)}")
-                    return jsonify({'error': '数据库连接失败'}), 500
-        wrapper.__name__ = func.__name__
-        return wrapper
     
     app = Flask(__name__)
     UPLOAD_FOLDER = 'upload'
@@ -569,7 +506,6 @@ def init_router(app: Flask):
         
 
     @app.route('/login', methods=['POST'])
-    @ensure_db_connection
     def login_user():
         data = request.get_json()
         email = data.get('email')
