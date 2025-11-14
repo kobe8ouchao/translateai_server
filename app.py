@@ -2,7 +2,7 @@ import base64
 import datetime
 from io import BytesIO
 import uuid
-from flask import Flask, request, jsonify, send_from_directory
+from flask import Flask, request, jsonify, send_from_directory, send_file
 import os
 import fitz  # PyMuPDF
 import threading
@@ -31,6 +31,9 @@ from alipay.aop.api.request.AlipayTradeAppPayRequest import AlipayTradeAppPayReq
 from db.schema import Order
 import time
 from alipay.aop.api.util.SignatureUtils import verify_with_rsa
+from supabase import create_client, Client
+import mimetypes
+import tempfile
 
 # 添加支付宝配置
 ALIPAY_APPID = os.getenv('ALIPAY_APPID', '你的支付宝APPID')
@@ -107,6 +110,11 @@ def create_app():
         os.makedirs(UPLOAD_FOLDER)  
     app.after_request(after_request)
     app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', GOOGLE_CLIENT_SECRET)
+    app.config['SUPABASE_URL'] = os.getenv('SUPABASE_URL', '')
+    app.config['SUPABASE_KEY'] = os.getenv('SUPABASE_KEY', '')
+    app.config['SUPABASE_BUCKET'] = os.getenv('SUPABASE_BUCKET', 'translateai')
+    if app.config['SUPABASE_URL'] and app.config['SUPABASE_KEY']:
+        app.config['SUPABASE'] = create_client(app.config['SUPABASE_URL'], app.config['SUPABASE_KEY'])
 
     # init_custom_router(app)
     # app.config['SECRET_KEY'] = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6IjYwMjQ2ZjQwZjQwZA=='
@@ -345,6 +353,28 @@ def replace_text_in_pdf(task_id, input_pdf_path, output_pdf_path, lang, user_id=
     update_progress(task_id, 100)
 
 def init_router(app: Flask):
+    def supabase_client():
+        return app.config.get('SUPABASE')
+
+    def storage_upload(bucket, key, data, content_type=None):
+        client = supabase_client()
+        if not client:
+            return False
+        if content_type:
+            return client.storage.from_(bucket).upload(key, data, file_options={"content-type": content_type, "upsert": True})
+        return client.storage.from_(bucket).upload(key, data, file_options={"upsert": True})
+
+    def storage_download(bucket, key):
+        client = supabase_client()
+        if not client:
+            return None
+        try:
+            return client.storage.from_(bucket).download(key)
+        except Exception:
+            return None
+
+    def storage_exists(bucket, key):
+        return storage_download(bucket, key) is not None
     @app.route('/translate', methods=['POST'])
     def translate_file():
         data = request.get_json()
@@ -353,39 +383,57 @@ def init_router(app: Flask):
         lang = data['lang']
         userId = data['userId']
         task_id = filename  # 可以用更复杂的方式生成唯一ID
-        user_folder = os.path.join(app.config['UPLOAD_FOLDER'], userId)
-        if not os.path.exists(user_folder):
-            os.makedirs(user_folder)
-        
-        input_file_path = os.path.join(app.config['UPLOAD_FOLDER'], userId, filename)
-        output_file_path = os.path.join(app.config['UPLOAD_FOLDER'], userId, f'translated_{lang}_{filename}')
-        fileType = check_file_type(input_file_path)
+        bucket = app.config['SUPABASE_BUCKET']
+        input_key = f"uploads/{userId}/{filename}"
+        output_name = f"translated_{lang}_{filename}"
+        output_key = f"translations/{userId}/{output_name}"
+        tmp_dir = os.path.join(tempfile.gettempdir(), 'translateai', userId)
+        os.makedirs(tmp_dir, exist_ok=True)
+        input_file_path = os.path.join(tmp_dir, filename)
+        output_file_path = os.path.join(tmp_dir, output_name)
+        fileType = check_file_type(filename)
         progress_dict[task_id] = 0  # 初始化进度
         
         # 检查翻译后的文件是否已经存在
-        if os.path.exists(output_file_path):
+        if storage_exists(bucket, output_key):
             progress_dict[task_id] = 100  # 初始化进度
             return jsonify({'message': 'Translation already exists', 'task_id': task_id})
 
-        if fileType == 'pdf':
-            threading.Thread(target=replace_text_in_pdf, args=(task_id, input_file_path, output_file_path, lang, userId)).start()
-            return jsonify({'message': 'Translation started', 'task_id': task_id})
-        elif fileType == 'txt':
-            threading.Thread(target=replace_text_in_txt, args=(task_id, input_file_path, output_file_path, update_progress, lang, userId)).start()
-            return jsonify({'message': 'Translation started', 'task_id': task_id})
-        elif fileType == 'json':
-            threading.Thread(target=replace_text_in_json, args=(task_id, input_file_path, output_file_path, update_progress, lang, userId)).start()
-            return jsonify({'message': 'Translation started', 'task_id': task_id})
-        elif fileType == 'markdown':
-            threading.Thread(target=replace_text_in_markdown, args=(task_id, input_file_path, output_file_path, update_progress, lang, userId)).start()
-            return jsonify({'message': 'Translation started', 'task_id': task_id})
-        elif fileType == 'word':
-            threading.Thread(target=replace_text_in_word, args=(task_id, input_file_path, output_file_path, update_progress, lang, userId)).start()
-            return jsonify({'message': 'Translation started', 'task_id': task_id})
-        elif fileType == 'excel':
+        if fileType == 'excel':
             return jsonify({'message': 'Excel translation not implemented', 'task_id': task_id})
-        else:
+        if fileType == 'error':
             return jsonify({'message': 'Unsupported file type', 'task_id': task_id}), 400
+        data_bytes = storage_download(bucket, input_key)
+        if not data_bytes:
+            return jsonify({'message': 'Source file not found in storage', 'task_id': task_id}), 404
+        with open(input_file_path, 'wb') as f:
+            f.write(data_bytes)
+
+        def run_and_upload():
+            if fileType == 'pdf':
+                replace_text_in_pdf(task_id, input_file_path, output_file_path, lang, userId)
+            elif fileType == 'txt':
+                replace_text_in_txt(task_id, input_file_path, output_file_path, update_progress, lang, userId)
+            elif fileType == 'json':
+                replace_text_in_json(task_id, input_file_path, output_file_path, update_progress, lang, userId)
+            elif fileType == 'markdown':
+                replace_text_in_markdown(task_id, input_file_path, output_file_path, update_progress, lang, userId)
+            elif fileType == 'word':
+                replace_text_in_word(task_id, input_file_path, output_file_path, update_progress, lang, userId)
+            else:
+                return
+            ct, _ = mimetypes.guess_type(output_name)
+            with open(output_file_path, 'rb') as of:
+                storage_upload(bucket, output_key, of.read(), ct or 'application/octet-stream')
+            try:
+                os.remove(input_file_path)
+                os.remove(output_file_path)
+            except Exception:
+                pass
+
+        threading.Thread(target=run_and_upload).start()
+        return jsonify({'message': 'Translation started', 'task_id': task_id})
+        
 
     @app.route('/progress/<task_id>', methods=['GET'])
     def get_progress(task_id):
@@ -420,40 +468,43 @@ def init_router(app: Flask):
             return jsonify({"error": "No file selected for uploading"}), 400
         
         if file:
-            # 创建用户专属目录
-            user_folder = os.path.join(app.config['UPLOAD_FOLDER'], userId)
-            if not os.path.exists(user_folder):
-                os.makedirs(user_folder)
-            
-            file_path = os.path.join(app.config['UPLOAD_FOLDER'], userId, md5Name)
-            file.save(file_path)
+            bucket = app.config['SUPABASE_BUCKET']
+            key = f"uploads/{userId}/{md5Name}"
+            ct, _ = mimetypes.guess_type(file.filename)
+            data = file.read()
+            res = storage_upload(bucket, key, data, ct or 'application/octet-stream')
+            if not res:
+                return jsonify({"error": "Storage upload failed"}), 500
             current_user = User.objects(id=ObjectId(userId)).first()
             
             user_file = UserFile(
                 user=current_user,
                 filename=md5Name,
                 origin_name=file.filename,
-                file_path=file_path,
+                file_path=key,
                 lang=lang,
                 file_type=type,
                 size=size
             )
             user_file.save()
-            return jsonify({"message": "File successfully uploaded", "file_path": file_path}), 200
+            return jsonify({"message": "File successfully uploaded", "file_path": key}), 200
         else:
             return jsonify({"error": "File upload failed"}), 500
 
     @app.route('/files/<userId>/<filename>', methods=['GET'])
     def get_file(userId,filename):
-        
         if not userId:
             return jsonify({"error": "User ID is required"}), 400
-            
-        user_folder = os.path.join(app.config['UPLOAD_FOLDER'], userId)
-        if not os.path.exists(user_folder):
-            return jsonify({"error": "User folder not found"}), 404
-        print("userId",user_folder,filename)
-        return send_from_directory(user_folder, filename)
+        bucket = app.config['SUPABASE_BUCKET']
+        if filename.startswith('translated_'):
+            key = f"translations/{userId}/{filename}"
+        else:
+            key = f"uploads/{userId}/{filename}"
+        data = storage_download(bucket, key)
+        if not data:
+            return jsonify({"error": "File not found"}), 404
+        ct, _ = mimetypes.guess_type(filename)
+        return send_file(BytesIO(data), download_name=filename, mimetype=ct or 'application/octet-stream')
 
     @app.route('/register', methods=['POST'])
     def register_user():
