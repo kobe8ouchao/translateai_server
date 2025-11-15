@@ -356,24 +356,45 @@ def init_router(app: Flask):
     def supabase_client():
         return app.config.get('SUPABASE')
 
+    def local_path_for_key(key: str):
+        parts = key.split('/')
+        if len(parts) >= 3:
+            user_id = parts[1]
+            filename = '/'.join(parts[2:])
+            return os.path.join(app.config['UPLOAD_FOLDER'], user_id, filename)
+        return os.path.join(app.config['UPLOAD_FOLDER'], key)
+
     def storage_upload(bucket, key, data, content_type=None):
         client = supabase_client()
         if not client:
-            return False
+            path = local_path_for_key(key)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, 'wb') as f:
+                f.write(data)
+            return True
+        opts = {"upsert": "true"}
         if content_type:
-            return client.storage.from_(bucket).upload(key, data, file_options={"content-type": content_type, "upsert": True})
-        return client.storage.from_(bucket).upload(key, data, file_options={"upsert": True})
+            opts["contentType"] = content_type
+        return client.storage.from_(bucket).upload(key, data, file_options=opts)
 
     def storage_download(bucket, key):
         client = supabase_client()
         if not client:
-            return None
+            path = local_path_for_key(key)
+            if not os.path.exists(path):
+                return None
+            with open(path, 'rb') as f:
+                return f.read()
         try:
             return client.storage.from_(bucket).download(key)
         except Exception:
             return None
 
     def storage_exists(bucket, key):
+        client = supabase_client()
+        if not client:
+            path = local_path_for_key(key)
+            return os.path.exists(path)
         return storage_download(bucket, key) is not None
     @app.route('/translate', methods=['POST'])
     def translate_file():
@@ -486,7 +507,10 @@ def init_router(app: Flask):
                 file_type=type,
                 size=size
             )
-            user_file.save()
+            try:
+                user_file.save()
+            except Exception as e:
+                print(f"UserFile save error: {e}")
             return jsonify({"message": "File successfully uploaded", "file_path": key}), 200
         else:
             return jsonify({"error": "File upload failed"}), 500
