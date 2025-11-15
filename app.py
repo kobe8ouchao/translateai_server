@@ -115,6 +115,14 @@ def create_app():
     app.config['SUPABASE_BUCKET'] = os.getenv('SUPABASE_BUCKET', 'translateai')
     if app.config['SUPABASE_URL'] and app.config['SUPABASE_KEY']:
         app.config['SUPABASE'] = create_client(app.config['SUPABASE_URL'], app.config['SUPABASE_KEY'])
+        try:
+            bucket_name = app.config['SUPABASE_BUCKET']
+            buckets = app.config['SUPABASE'].storage.list_buckets()
+            if not any(getattr(b, 'name', None) == bucket_name for b in buckets):
+                app.config['SUPABASE'].storage.create_bucket(bucket_name, public=True)
+                print(f"Created bucket: {bucket_name}")
+        except Exception as e:
+            print(f"Ensure bucket error: {e}")
 
     # init_custom_router(app)
     # app.config['SECRET_KEY'] = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6IjYwMjQ2ZjQwZjQwZA=='
@@ -356,6 +364,7 @@ def init_router(app: Flask):
     def supabase_client():
         return app.config.get('SUPABASE')
 
+
     def local_path_for_key(key: str):
         parts = key.split('/')
         if len(parts) >= 3:
@@ -371,11 +380,23 @@ def init_router(app: Flask):
             os.makedirs(os.path.dirname(path), exist_ok=True)
             with open(path, 'wb') as f:
                 f.write(data)
-            return True
+            return True, None
+        # ensure bucket exists
+        try:
+            buckets = client.storage.list_buckets()
+            if not any(b.get('name') == bucket for b in buckets):
+                client.storage.create_bucket(bucket)
+        except Exception:
+            pass
         opts = {"upsert": "true"}
         if content_type:
             opts["contentType"] = content_type
-        return client.storage.from_(bucket).upload(key, data, file_options=opts)
+        try:
+            client.storage.from_(bucket).upload(key, data, file_options=opts)
+            return True, None
+        except Exception as e:
+            print(f"Supabase upload error: {e}")
+            return False, str(e)
 
     def storage_download(bucket, key):
         client = supabase_client()
@@ -403,16 +424,22 @@ def init_router(app: Flask):
         filename = data['filename']
         lang = data['lang']
         userId = data['userId']
-        task_id = filename  # 可以用更复杂的方式生成唯一ID
+        task_id = filename
         bucket = app.config['SUPABASE_BUCKET']
-        input_key = f"uploads/{userId}/{filename}"
-        output_name = f"translated_{lang}_{filename}"
+        user = User.objects(id=ObjectId(userId)).first()
+        if not user:
+            return jsonify({'message': 'User not found', 'task_id': task_id}), 404
+        user_file = UserFile.objects(user=user, filename=filename).first()
+        if not user_file:
+            return jsonify({'message': 'File not found for user', 'task_id': task_id}), 404
+        input_key = user_file.file_path
+        output_name = f"translated_{lang}_{user_file.filename}"
         output_key = f"translations/{userId}/{output_name}"
         tmp_dir = os.path.join(tempfile.gettempdir(), 'translateai', userId)
         os.makedirs(tmp_dir, exist_ok=True)
-        input_file_path = os.path.join(tmp_dir, filename)
+        input_file_path = os.path.join(tmp_dir, user_file.filename)
         output_file_path = os.path.join(tmp_dir, output_name)
-        fileType = check_file_type(filename)
+        fileType = check_file_type(user_file.filename) if check_file_type(user_file.filename) != 'error' else check_file_type(user_file.origin_name)
         progress_dict[task_id] = 0  # 初始化进度
         
         # 检查翻译后的文件是否已经存在
@@ -493,9 +520,9 @@ def init_router(app: Flask):
             key = f"uploads/{userId}/{md5Name}"
             ct, _ = mimetypes.guess_type(file.filename)
             data = file.read()
-            res = storage_upload(bucket, key, data, ct or 'application/octet-stream')
-            if not res:
-                return jsonify({"error": "Storage upload failed"}), 500
+            ok, err = storage_upload(bucket, key, data, ct or 'application/octet-stream')
+            if not ok:
+                return jsonify({"error": "Storage upload failed", "detail": err}), 500
             current_user = User.objects(id=ObjectId(userId)).first()
             
             user_file = UserFile(
@@ -520,10 +547,18 @@ def init_router(app: Flask):
         if not userId:
             return jsonify({"error": "User ID is required"}), 400
         bucket = app.config['SUPABASE_BUCKET']
-        if filename.startswith('translated_'):
-            key = f"translations/{userId}/{filename}"
-        else:
-            key = f"uploads/{userId}/{filename}"
+        key = None
+        if not filename.startswith('translated_'):
+            user = User.objects(id=ObjectId(userId)).first()
+            if user:
+                uf = UserFile.objects(user=user, filename=filename).first()
+                if uf:
+                    key = uf.file_path
+        if key is None:
+            if filename.startswith('translated_'):
+                key = f"translations/{userId}/{filename}"
+            else:
+                key = f"uploads/{userId}/{filename}"
         data = storage_download(bucket, key)
         if not data:
             return jsonify({"error": "File not found"}), 404
@@ -623,6 +658,7 @@ def init_router(app: Flask):
                 "origin_name": user_file.origin_name,
                 "status": 'done',
                 "url": user_file.filename,
+                "key": user_file.file_path,
                 "uid": '-1',
                 "file_type": user_file.file_type,
                 "size": user_file.size,
