@@ -5,9 +5,6 @@ from langchain.chains import LLMChain
 from langchain.prompts import PromptTemplate
 from langchain_openai import ChatOpenAI
 
-# 设置 OpenAI API 密钥
-os.environ["OPENAI_API_KEY"] = os.getenv('OPENAI_API_KEY', '')
-
 # 创建翻译链
 def create_translation_chain(lang):
     llm = OpenAI(temperature=0.7)
@@ -31,14 +28,27 @@ def create_translation_chain_by_dk(lang):
         input_variables=["text", "lang"],
         template=template
     )
-    # Initialize ChatOpenAI with GPT-4
-    llm = ChatOpenAI(
-        # openai_api_base=#"https://ark.cn-beijing.volces.com/api/v3",
-        openai_api_key=os.getenv('OPENAI_API_KEY', ''),  # 从环境变量读取API key
-        model_name="gpt-4o",
-        temperature=0.3,
-        callbacks=[]
-    )
+    ark_key = os.getenv('ARK_API_KEY')
+    ark_base = os.getenv('ARK_BASE_URL', 'https://ark.cn-beijing.volces.com/api/v3')
+    ark_model = os.getenv('ARK_MODEL')
+    if ark_key and ark_model:
+        llm = ChatOpenAI(
+            openai_api_key=ark_key,
+            openai_api_base=ark_base,
+            model_name=ark_model,
+            temperature=0.3,
+            callbacks=[]
+        )
+    else:
+        key = os.getenv('OPENAI_API_KEY')
+        if not key or not key.strip():
+            raise RuntimeError("OPENAI_API_KEY is not set")
+        llm = ChatOpenAI(
+            openai_api_key=key,
+            model_name="gpt-4o",
+            temperature=0.3,
+            callbacks=[]
+        )
     # 创建翻译链
     chain = LLMChain(llm=llm, prompt=prompt, callbacks=[])
     

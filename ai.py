@@ -5,19 +5,15 @@ Email: ouchao@sendpalm.com
 version: 1.0
 Date: 2024-06-13 16:28:38
 LastEditors: ouchao
-LastEditTime: 2025-03-14 10:23:30
+LastEditTime: 2025-11-15 15:28:32
 '''
 import os
 
 from langchain.llms import OpenAI
 from langchain.chains import LLMChain
 from langchain.prompts import PromptTemplate
-os.environ["OPENAI_API_KEY"] = os.getenv('OPENAI_API_KEY', '')
 
 
-os.environ["ARK_API_KEY"] = os.getenv('ARK_API_KEY', '')
-os.environ["VOLC_ACCESSKEY"] = os.getenv('VOLC_ACCESSKEY', '')
-os.environ["VOLC_SECRETKEY"] = os.getenv('VOLC_SECRETKEY', '')
 from langchain_community.callbacks.manager import get_openai_callback
 from langchain_openai import ChatOpenAI
 import os
@@ -71,7 +67,7 @@ def count_tokens_accurate(text,llm,lang):
 
 
 # 处理txt文件的翻译
-def replace_text_in_txt(task_id, input_txt_path, output_txt_path, update_progress,lang,user_id=None):
+def replace_text_in_txt(task_id, input_txt_path, output_txt_path, update_progress,lang,user_id=None, on_write=None):
     try:
         # 读取原始文本文件
         with open(input_txt_path, 'r', encoding='utf-8') as file:
@@ -110,10 +106,20 @@ def replace_text_in_txt(task_id, input_txt_path, output_txt_path, update_progres
             # 更新进度
             progress = ((i + 1) / total_paragraphs) * 100
             update_progress(task_id, progress)
+            if on_write:
+                try:
+                    on_write('\n\n'.join(translated_paragraphs))
+                except Exception as e:
+                    pass
         
         # 将翻译后的段落写入新文件
         with open(output_txt_path, 'w', encoding='utf-8') as file:
             file.write('\n\n'.join(translated_paragraphs))
+        if on_write:
+            try:
+                on_write('\n\n'.join(translated_paragraphs))
+            except Exception:
+                pass
          # 更新用户tokens
         if user_id:
             try:
@@ -251,7 +257,7 @@ def translate_json_object(obj, translation_chain, lang, task_id, total_items, tr
         return obj
 
 # 处理Markdown文件的翻译
-def replace_text_in_markdown(task_id, input_md_path, output_md_path, update_progress,lang,user_id=None):
+def replace_text_in_markdown(task_id, input_md_path, output_md_path, update_progress,lang,user_id=None, on_write=None):
     try:
         # 读取原始Markdown文件
         with open(input_md_path, 'r', encoding='utf-8') as file:
@@ -347,11 +353,19 @@ def replace_text_in_markdown(task_id, input_md_path, output_md_path, update_prog
                         print(f"Token number =========: {input_tokens + output_tokens}")
                     except Exception as e:
                         print(f"翻译段落时出错: {e}")
-                        translated_lines.extend(current_paragraph)  # 保留原文
+                        translated_lines.extend(current_paragraph)
                     current_paragraph = []
                 
                 # 保留特殊行原样
                 translated_lines.append(line)
+                if on_write:
+                    try:
+                        tmp_content = '\n'.join(translated_lines)
+                        for placeholder, original in placeholder_map.items():
+                            tmp_content = tmp_content.replace(placeholder, original)
+                        on_write(tmp_content)
+                    except Exception:
+                        pass
             else:
                 # 收集普通文本行到当前段落
                 current_paragraph.append(line)
@@ -387,6 +401,11 @@ def replace_text_in_markdown(task_id, input_md_path, output_md_path, update_prog
         # 将翻译后的内容写入新文件
         with open(output_md_path, 'w', encoding='utf-8') as file:
             file.write(translated_content)
+        if on_write:
+            try:
+                on_write(translated_content)
+            except Exception:
+                pass
         # 更新用户tokens
         if user_id:
             try:
@@ -413,3 +432,175 @@ def replace_text_in_markdown(task_id, input_md_path, output_md_path, update_prog
         print(f"处理Markdown文件时出错: {e}")
         update_progress(task_id, 0)
         return False
+def translate_txt_content(task_id, text, update_progress, lang, user_id=None):
+    try:
+        paragraphs = text.split('\n\n')
+        total_paragraphs = len(paragraphs)
+        translated_paragraphs = []
+        translation_chain = create_translation_chain_by_dk(lang)
+        total_tokens = 0
+        for i, paragraph in enumerate(paragraphs):
+            if paragraph.strip():
+                try:
+                    translated = translation_chain.run(text=paragraph.strip(), lang=lang)
+                    translated_paragraphs.append(translated)
+                    input_tokens = count_tokens_accurate(paragraph.strip(), translation_chain, lang)
+                    output_tokens = count_tokens_accurate(translated, translation_chain, lang)
+                    total_tokens += input_tokens + output_tokens
+                except Exception:
+                    translated_paragraphs.append(paragraph)
+            else:
+                translated_paragraphs.append('')
+            progress = ((i + 1) / total_paragraphs) * 100
+            update_progress(task_id, progress)
+        content = '\n\n'.join(translated_paragraphs)
+        if user_id:
+            try:
+                from db.schema import User
+                from bson import ObjectId
+                user = User.objects(id=ObjectId(user_id)).first()
+                if user:
+                    if not hasattr(user, 'tokens') or user.tokens is None:
+                        user.tokens = 5000
+                    user.tokens -= total_tokens
+                    if user.tokens < 0:
+                        user.tokens = 0
+                    user.save()
+            except Exception:
+                pass
+        update_progress(task_id, 100)
+        return content
+    except Exception:
+        update_progress(task_id, 0)
+        return text
+def translate_json_content(task_id, obj, update_progress, lang, user_id=None):
+    try:
+        translation_chain = create_translation_chain_by_dk(lang)
+        total_items = count_json_items(obj)
+        translated_items = [0]
+        total_tokens = [0]
+        result = translate_json_object(obj, translation_chain, lang, task_id, total_items, translated_items, update_progress, total_tokens)
+        if user_id:
+            try:
+                from db.schema import User
+                from bson import ObjectId
+                user = User.objects(id=ObjectId(user_id)).first()
+                if user:
+                    if not hasattr(user, 'tokens') or user.tokens is None:
+                        user.tokens = 5000
+                    user.tokens -= total_tokens[0]
+                    if user.tokens < 0:
+                        user.tokens = 0
+                    user.save()
+            except Exception:
+                pass
+        update_progress(task_id, 100)
+        return result
+    except Exception:
+        update_progress(task_id, 0)
+        return obj
+def translate_markdown_content(task_id, content, update_progress, lang, user_id=None):
+    try:
+        total_tokens = 0
+        code_block_pattern = r'```[\s\S]*?```'
+        inline_code_pattern = r'`[^`]+`'
+        link_pattern = r'\[([^\]]+)\]\(([^)]+)\)'
+        image_pattern = r'!\[([^\]]*)\]\(([^)]+)\)'
+        heading_pattern = r'^#+\s+.*$'
+        code_blocks = re.findall(code_block_pattern, content)
+        inline_codes = re.findall(inline_code_pattern, content)
+        links = re.findall(link_pattern, content)
+        images = re.findall(image_pattern, content)
+        placeholder_map = {}
+        for i, block in enumerate(code_blocks):
+            placeholder = f"CODE_BLOCK_{i}"
+            content = content.replace(block, placeholder)
+            placeholder_map[placeholder] = block
+        for i, code in enumerate(inline_codes):
+            placeholder = f"INLINE_CODE_{i}"
+            content = content.replace(code, placeholder)
+            placeholder_map[placeholder] = code
+        for i, link in enumerate(links):
+            link_text, link_url = link
+            original = f"[{link_text}]({link_url})"
+            placeholder = f"LINK_{i}"
+            content = content.replace(original, placeholder)
+            placeholder_map[placeholder] = original
+        for i, image in enumerate(images):
+            alt_text, image_url = image
+            original = f"![{alt_text}]({image_url})"
+            placeholder = f"IMAGE_{i}"
+            content = content.replace(original, placeholder)
+            placeholder_map[placeholder] = original
+        lines = content.split('\n')
+        total_lines = len(lines)
+        translated_lines = []
+        translation_chain = create_translation_chain_by_dk(lang)
+        current_paragraph = []
+        i = 0
+        while i < total_lines:
+            line = lines[i]
+            is_special_line = (
+                not line.strip() or
+                any(placeholder in line for placeholder in placeholder_map.keys()) or
+                re.match(r'^#+\s+', line) or
+                re.match(r'^[-*+]\s+', line) or
+                re.match(r'^\d+\.\s+', line) or
+                re.match(r'^>\s+', line) or
+                re.match(r'^(\s{2,}|\t)[-*+]\s+', line) or
+                re.match(r'^(\s{2,}|\t)\d+\.\s+', line) or
+                re.match(r'^(\s{4,}|\t+)', line) or
+                re.match(r'^[=-]{3,}$', line) or
+                line.startswith('|') or
+                line.startswith('---')
+            )
+            if is_special_line:
+                if current_paragraph:
+                    paragraph_text = '\n'.join(current_paragraph)
+                    try:
+                        translated_text = translation_chain.run(text=paragraph_text, lang=lang)
+                        translated_lines.extend(translated_text.split('\n'))
+                        input_tokens = count_tokens_accurate(paragraph_text, translation_chain, lang)
+                        output_tokens = count_tokens_accurate(translated_text, translation_chain, lang)
+                        total_tokens += input_tokens + output_tokens
+                    except Exception:
+                        translated_lines.extend(current_paragraph)
+                    current_paragraph = []
+                translated_lines.append(line)
+            else:
+                current_paragraph.append(line)
+            i += 1
+            progress = (i / total_lines) * 100
+            update_progress(task_id, progress)
+        if current_paragraph:
+            paragraph_text = '\n'.join(current_paragraph)
+            try:
+                translated_text = translation_chain.run(text=paragraph_text, lang=lang)
+                translated_lines.extend(translated_text.split('\n'))
+                input_tokens = count_tokens_accurate(paragraph_text, translation_chain, lang)
+                output_tokens = count_tokens_accurate(translated_text, translation_chain, lang)
+                total_tokens += input_tokens + output_tokens
+            except Exception:
+                translated_lines.extend(current_paragraph)
+        translated_content = '\n'.join(translated_lines)
+        for placeholder, original in placeholder_map.items():
+            translated_content = translated_content.replace(placeholder, original)
+        if user_id:
+            try:
+                from db.schema import User
+                from bson import ObjectId
+                user = User.objects(id=ObjectId(user_id)).first()
+                if user:
+                    if not hasattr(user, 'tokens') or user.tokens is None:
+                        user.tokens = 5000
+                    user.tokens -= total_tokens
+                    if user.tokens < 0:
+                        user.tokens = 0
+                    user.save()
+            except Exception:
+                pass
+        update_progress(task_id, 100)
+        return translated_content
+    except Exception:
+        update_progress(task_id, 0)
+        return content

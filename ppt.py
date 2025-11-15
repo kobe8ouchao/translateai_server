@@ -5,8 +5,6 @@ from langchain.llms import OpenAI
 from langchain.chains import LLMChain
 from langchain.prompts import PromptTemplate
 
-# 设置 OpenAI API 密钥
-os.environ["OPENAI_API_KEY"] = os.getenv('OPENAI_API_KEY', '')
 
 # 创建翻译链
 def create_translation_chain():

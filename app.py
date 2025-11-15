@@ -32,6 +32,7 @@ from db.schema import Order
 import time
 from alipay.aop.api.util.SignatureUtils import verify_with_rsa
 from supabase import create_client, Client
+from dotenv import load_dotenv, find_dotenv
 import mimetypes
 import tempfile
 
@@ -71,6 +72,7 @@ def after_request(resp):
 #kobe824ouchao_db_user
 #BUqjCRI3jsFMzLfE
 def create_app():
+    load_dotenv(find_dotenv())
     # 修改MongoDB连接
     mongo_uri = os.getenv('MONGO_URI', 'mongodb://localhost:27017/translateai?authSource=admin')
     # 从URI中提取数据库名称
@@ -111,10 +113,12 @@ def create_app():
     app.after_request(after_request)
     app.config['SECRET_KEY'] = os.getenv('SECRET_KEY', GOOGLE_CLIENT_SECRET)
     app.config['SUPABASE_URL'] = os.getenv('SUPABASE_URL', '')
-    app.config['SUPABASE_KEY'] = os.getenv('SUPABASE_KEY', '')
-    app.config['SUPABASE_BUCKET'] = os.getenv('SUPABASE_BUCKET', 'translateai')
+    app.config['SUPABASE_KEY'] = os.getenv('SUPABASE_KEY', '') or os.getenv('SUPABASE_SERVICE_ROLE_KEY', '')
+    app.config['SUPABASE_BUCKET'] = os.getenv('SUPABASE_BUCKET', 'transaletor')
+    print(f"Supabase bucket: {app.config['SUPABASE_URL']}{app.config['SUPABASE_KEY']}")
     if app.config['SUPABASE_URL'] and app.config['SUPABASE_KEY']:
         app.config['SUPABASE'] = create_client(app.config['SUPABASE_URL'], app.config['SUPABASE_KEY'])
+        print(f"Supabase client created: {app.config['SUPABASE']}")
         try:
             bucket_name = app.config['SUPABASE_BUCKET']
             buckets = app.config['SUPABASE'].storage.list_buckets()
@@ -375,7 +379,9 @@ def init_router(app: Flask):
 
     def storage_upload(bucket, key, data, content_type=None):
         client = supabase_client()
+        
         if not client:
+            print("Supabase client not initialized")
             path = local_path_for_key(key)
             os.makedirs(os.path.dirname(path), exist_ok=True)
             with open(path, 'wb') as f:
@@ -383,16 +389,22 @@ def init_router(app: Flask):
             return True, None
         # ensure bucket exists
         try:
+            print(f"Upload start bucket={bucket} key={key} ct={content_type} size={len(data) if hasattr(data,'__len__') else 'unknown'}")
             buckets = client.storage.list_buckets()
-            if not any(b.get('name') == bucket for b in buckets):
+            print(f"Buckets: {[getattr(b,'name', None) if not isinstance(b, dict) else b.get('name') for b in buckets]}")
+            if not any((getattr(b, 'name', None) == bucket) if not isinstance(b, dict) else (b.get('name') == bucket) for b in buckets):
                 client.storage.create_bucket(bucket)
-        except Exception:
+                print(f"Bucket created: {bucket}")
+        except Exception as e:
+            print(f"Ensure bucket error: {e}")
             pass
         opts = {"upsert": "true"}
         if content_type:
             opts["contentType"] = content_type
         try:
+            print(f"Upload options: {opts}")
             client.storage.from_(bucket).upload(key, data, file_options=opts)
+            print(f"Upload success bucket={bucket} key={key}")
             return True, None
         except Exception as e:
             print(f"Supabase upload error: {e}")
@@ -417,6 +429,24 @@ def init_router(app: Flask):
             path = local_path_for_key(key)
             return os.path.exists(path)
         return storage_download(bucket, key) is not None
+
+    def storage_signed_url(bucket, key, expires=300):
+        client = supabase_client()
+        if not client:
+            return None
+        try:
+            res = client.storage.from_(bucket).create_signed_url(key, expires)
+            if isinstance(res, dict):
+                print(f"Signed URL raw: {res}")
+                url = res.get('signedURL') or res.get('signed_url') or res.get('url')
+                if not url:
+                    print(f"Signed URL missing for bucket={bucket}, key={key}")
+                return url
+            print(f"Signed URL raw: {res}")
+            return res
+        except Exception as e:
+            print(f"Signed URL error for bucket={bucket}, key={key}: {e}")
+            return None
     @app.route('/translate', methods=['POST'])
     def translate_file():
         data = request.get_json()
@@ -451,33 +481,67 @@ def init_router(app: Flask):
             return jsonify({'message': 'Excel translation not implemented', 'task_id': task_id})
         if fileType == 'error':
             return jsonify({'message': 'Unsupported file type', 'task_id': task_id}), 400
+        ark_key = os.getenv('ARK_API_KEY')
+        ark_model = os.getenv('ARK_MODEL')
+        has_ark = bool(ark_key and ark_model)
+        has_openai = bool(os.getenv('OPENAI_API_KEY') and os.getenv('OPENAI_API_KEY').strip())
+        if not (has_ark or has_openai):
+            return jsonify({'message': 'LLM API key is missing', 'task_id': task_id}), 400
         data_bytes = storage_download(bucket, input_key)
         if not data_bytes:
             return jsonify({'message': 'Source file not found in storage', 'task_id': task_id}), 404
-        with open(input_file_path, 'wb') as f:
-            f.write(data_bytes)
+        if fileType in ('pdf', 'word'):
+            with open(input_file_path, 'wb') as f:
+                f.write(data_bytes)
 
         def run_and_upload():
-            if fileType == 'pdf':
-                replace_text_in_pdf(task_id, input_file_path, output_file_path, lang, userId)
-            elif fileType == 'txt':
-                replace_text_in_txt(task_id, input_file_path, output_file_path, update_progress, lang, userId)
-            elif fileType == 'json':
-                replace_text_in_json(task_id, input_file_path, output_file_path, update_progress, lang, userId)
-            elif fileType == 'markdown':
-                replace_text_in_markdown(task_id, input_file_path, output_file_path, update_progress, lang, userId)
-            elif fileType == 'word':
-                replace_text_in_word(task_id, input_file_path, output_file_path, update_progress, lang, userId)
-            else:
-                return
-            ct, _ = mimetypes.guess_type(output_name)
-            with open(output_file_path, 'rb') as of:
-                storage_upload(bucket, output_key, of.read(), ct or 'application/octet-stream')
             try:
-                os.remove(input_file_path)
-                os.remove(output_file_path)
-            except Exception:
-                pass
+                print(f"Translate start task={task_id} type={fileType} user={userId}")
+                if fileType == 'pdf':
+                    replace_text_in_pdf(task_id, input_file_path, output_file_path, lang, userId)
+                    ct, _ = mimetypes.guess_type(output_name)
+                    with open(output_file_path, 'rb') as of:
+                        storage_upload(bucket, output_key, of.read(), ct or 'application/pdf')
+                    try:
+                        os.remove(input_file_path)
+                        os.remove(output_file_path)
+                    except Exception:
+                        pass
+                elif fileType == 'word':
+                    replace_text_in_word(task_id, input_file_path, output_file_path, update_progress, lang, userId)
+                    ct, _ = mimetypes.guess_type(output_name)
+                    with open(output_file_path, 'rb') as of:
+                        storage_upload(bucket, output_key, of.read(), ct or 'application/vnd.openxmlformats-officedocument.wordprocessingml.document')
+                    try:
+                        os.remove(input_file_path)
+                        os.remove(output_file_path)
+                    except Exception:
+                        pass
+                elif fileType == 'txt':
+                    from ai import translate_txt_content
+                    translated = translate_txt_content(task_id, data_bytes.decode('utf-8'), update_progress, lang, userId)
+                    storage_upload(bucket, output_key, translated.encode('utf-8'), 'text/plain')
+                elif fileType == 'json':
+                    from ai import translate_json_content
+                    import json as _json
+                    obj = _json.loads(data_bytes.decode('utf-8'))
+                    translated_obj = translate_json_content(task_id, obj, update_progress, lang, userId)
+                    encoded = _json.dumps(translated_obj, ensure_ascii=False, indent=2).encode('utf-8')
+                    storage_upload(bucket, output_key, encoded, 'application/json')
+                elif fileType == 'markdown':
+                    from ai import translate_markdown_content
+                    translated = translate_markdown_content(task_id, data_bytes.decode('utf-8'), update_progress, lang, userId)
+                    storage_upload(bucket, output_key, translated.encode('utf-8'), 'text/markdown')
+                else:
+                    print(f"Unsupported fileType in runner: {fileType}")
+                    return
+                print(f"Translate done task={task_id} type={fileType}")
+            except Exception as e:
+                print(f"Translate error task={task_id} type={fileType}: {e}")
+                try:
+                    update_progress(task_id, 0)
+                except Exception:
+                    pass
 
         threading.Thread(target=run_and_upload).start()
         return jsonify({'message': 'Translation started', 'task_id': task_id})
@@ -538,7 +602,9 @@ def init_router(app: Flask):
                 user_file.save()
             except Exception as e:
                 print(f"UserFile save error: {e}")
-            return jsonify({"message": "File successfully uploaded", "file_path": key}), 200
+            exists = storage_exists(bucket, key)
+            signed = storage_signed_url(bucket, key, expires=600)
+            return jsonify({"message": "File successfully uploaded", "file_path": key, "exists": exists, "signed_url": signed}), 200
         else:
             return jsonify({"error": "File upload failed"}), 500
 
@@ -565,6 +631,57 @@ def init_router(app: Flask):
         ct, _ = mimetypes.guess_type(filename)
         return send_file(BytesIO(data), download_name=filename, mimetype=ct or 'application/octet-stream')
 
+    @app.route('/files/url', methods=['POST'])
+    def get_file_signed_url():
+        data = request.get_json()
+        userId = data.get('userId')
+        filename = data.get('filename')
+        translated = data.get('translated', False)
+        if not userId or not filename:
+            return jsonify({"error": "Missing userId or filename"}), 400
+        bucket = app.config['SUPABASE_BUCKET']
+        key = None
+        if translated or filename.startswith('translated_'):
+            key = f"translations/{userId}/{filename}"
+        else:
+            user = User.objects(id=ObjectId(userId)).first()
+            if user:
+                uf = UserFile.objects(user=user, filename=filename).first()
+                if uf:
+                    key = uf.file_path
+        if key is None:
+            key = f"uploads/{userId}/{filename}"
+        exists = storage_exists(bucket, key)
+        url = storage_signed_url(bucket, key, expires=600)
+        if not url:
+            return jsonify({"error": "Failed to create signed url", "exists": exists}), 500
+        return jsonify({"url": url, "exists": exists})
+
+    @app.route('/supabase/health', methods=['GET'])
+    def supabase_health():
+        client = supabase_client()
+        bucket = app.config['SUPABASE_BUCKET']
+        status = {"client_initialized": bool(client), "bucket": bucket}
+        if not client:
+            return jsonify(status)
+        try:
+            buckets = client.storage.list_buckets()
+            names = [getattr(b, 'name', None) if not isinstance(b, dict) else b.get('name') for b in buckets]
+            status["buckets"] = names
+            status["bucket_exists"] = bucket in names
+        except Exception as e:
+            status["list_error"] = str(e)
+        key = f"health/{uuid.uuid4().hex}.txt"
+        ok, err = storage_upload(bucket, key, b"health", "text/plain")
+        status["upload_ok"] = ok
+        if not ok:
+            status["upload_error"] = err
+            return jsonify(status)
+        status["exists"] = storage_exists(bucket, key)
+        url = storage_signed_url(bucket, key, 300)
+        status["signed_url"] = url
+        return jsonify(status)
+
     @app.route('/register', methods=['POST'])
     def register_user():
         data = request.get_json()
@@ -583,34 +700,32 @@ def init_router(app: Flask):
         if User.objects(email=email).first():
             return jsonify({'error': 'Email already exists'}), 400
 
-        # 创建新用户
+        # 创建新用户（持久连接，不使用 get_connection 上下文关闭连接）
         try:
-        # 使用已经注册的数据库连接
-            with get_connection(alias='default'):
-                # 检查用户名是否已存在
-                if User.objects(name=username).first():
-                    return jsonify({'error': 'Username already exists'}), 400
+            # 检查用户名是否已存在
+            if User.objects(name=username).first():
+                return jsonify({'error': 'Username already exists'}), 400
 
-                # 检查邮箱是否已存在
-                if User.objects(email=email).first():
-                    return jsonify({'error': 'Email already exists'}), 400
+            # 检查邮箱是否已存在
+            if User.objects(email=email).first():
+                return jsonify({'error': 'Email already exists'}), 400
 
-                # 创建新用户
-                hashed_password = generate_password_hash(password)
-                new_user = User(name=username, email=email, password=hashed_password)
-                new_user.save()
+            # 创建新用户
+            hashed_password = generate_password_hash(password)
+            new_user = User(name=username, email=email, password=hashed_password)
+            new_user.save()
 
-                # 返回用户信息（不包括密码）
-                return jsonify({
-                    'message': 'User registered successfully',
-                    'user': {
-                        'id': str(new_user.id),
-                        'username': new_user.name,
-                        'email': new_user.email,
-                        'tokens': new_user.tokens if hasattr(new_user, 'tokens') and new_user.tokens is not None else 0,
-                        'vip': new_user.vip if hasattr(new_user, 'vip') and new_user.vip is not None else 0
-                    }
-                }), 201
+            # 返回用户信息（不包括密码）
+            return jsonify({
+                'message': 'User registered successfully',
+                'user': {
+                    'id': str(new_user.id),
+                    'username': new_user.name,
+                    'email': new_user.email,
+                    'tokens': new_user.tokens if hasattr(new_user, 'tokens') and new_user.tokens is not None else 0,
+                    'vip': new_user.vip if hasattr(new_user, 'vip') and new_user.vip is not None else 0
+                }
+            }), 201
         except Exception as e:
             return jsonify({'error': str(e)}), 500
         
