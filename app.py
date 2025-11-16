@@ -23,7 +23,7 @@ import secrets
 import requests
 import qrcode
 from urllib.parse import quote
-from ai import count_tokens_accurate, replace_text_in_txt, replace_text_in_json, replace_text_in_markdown, compute_token_cost
+from ai import count_tokens_accurate, replace_text_in_txt, replace_text_in_json, replace_text_in_markdown, compute_token_cost, consume_user_tokens
 from alipay.aop.api.AlipayClientConfig import AlipayClientConfig
 from alipay.aop.api.DefaultAlipayClient import DefaultAlipayClient
 from alipay.aop.api.domain.AlipayTradeAppPayModel import AlipayTradeAppPayModel
@@ -350,16 +350,7 @@ def replace_text_in_pdf(task_id, input_pdf_path, output_pdf_path, lang, user_id=
     new_doc.close()
     if user_id:
         try:
-            user = User.objects(id=ObjectId(user_id)).first()
-            if user:
-                # 确保tokens字段存在
-                if not hasattr(user, 'tokens') or user.tokens is None:
-                    user.tokens = 5000
-                
-                # 减去使用的tokens
-                user.tokens -= total_tokens
-                user.save()
-                print(f"用户 {user_id} 的tokens余额更新为: {user.tokens}，本次消耗: {total_tokens}")
+            consume_user_tokens(user_id, total_tokens)
         except Exception as e:
             print(f"更新用户token使用量时出错: {e}")
     update_progress(task_id, 100)
@@ -493,6 +484,39 @@ def init_router(app: Flask):
         if fileType in ('pdf', 'word'):
             with open(input_file_path, 'wb') as f:
                 f.write(data_bytes)
+        required_tokens = int(os.getenv('MIN_TOKENS_REQUIRED', '0'))
+        try:
+            if fileType == 'txt':
+                text = data_bytes.decode('utf-8', errors='ignore')
+                in_toks = count_tokens_accurate(text, None, lang)
+                out_toks = in_toks
+                required_tokens = max(required_tokens, compute_token_cost(in_toks, out_toks))
+            elif fileType == 'json':
+                text = data_bytes.decode('utf-8', errors='ignore')
+                in_toks = count_tokens_accurate(text, None, lang)
+                out_toks = in_toks
+                required_tokens = max(required_tokens, compute_token_cost(in_toks, out_toks))
+            elif fileType == 'markdown':
+                text = data_bytes.decode('utf-8', errors='ignore')
+                in_toks = count_tokens_accurate(text, None, lang)
+                out_toks = in_toks
+                required_tokens = max(required_tokens, compute_token_cost(in_toks, out_toks))
+            elif fileType == 'pdf':
+                words = count_total_words(input_file_path)
+                required_tokens = max(required_tokens, compute_token_cost(words, words))
+            elif fileType == 'word':
+                approx = max(1, len(data_bytes) // 4)
+                required_tokens = max(required_tokens, compute_token_cost(approx, approx))
+        except Exception:
+            pass
+        try:
+            user = User.objects(id=ObjectId(userId)).first()
+            if user:
+                available = user.tokens if hasattr(user, 'tokens') and user.tokens is not None else 0
+                if required_tokens and available < required_tokens:
+                    return jsonify({'message': 'Insufficient tokens', 'required': required_tokens, 'available': available, 'task_id': task_id}), 402
+        except Exception as e:
+            return jsonify({'message': 'Token check failed', 'error': str(e), 'task_id': task_id}), 500
 
         def run_and_upload():
             try:
