@@ -23,7 +23,7 @@ import secrets
 import requests
 import qrcode
 from urllib.parse import quote
-from ai import count_tokens_accurate, replace_text_in_txt, replace_text_in_json, replace_text_in_markdown
+from ai import count_tokens_accurate, replace_text_in_txt, replace_text_in_json, replace_text_in_markdown, compute_token_cost
 from alipay.aop.api.AlipayClientConfig import AlipayClientConfig
 from alipay.aop.api.DefaultAlipayClient import DefaultAlipayClient
 from alipay.aop.api.domain.AlipayTradeAppPayModel import AlipayTradeAppPayModel
@@ -253,7 +253,7 @@ def replace_text_in_pdf(task_id, input_pdf_path, output_pdf_path, lang, user_id=
                             translated = translation_chain.run(text=line_text.strip(), lang=lang).strip()
                             input_tokens = count_tokens_accurate(line_text.strip(),translation_chain,lang)
                             output_tokens = count_tokens_accurate(translated.strip(),translation_chain,lang)
-                            total_tokens = total_tokens + input_tokens+output_tokens
+                            total_tokens = total_tokens + compute_token_cost(input_tokens, output_tokens)
                             print(f"Token input number =========: {input_tokens}======output numbeer: {output_tokens}")
                             print(f"原文: {line_text.strip()}=========译文: {translated}")
                             translated_words += len(line_text.split())
@@ -555,6 +555,32 @@ def init_router(app: Flask):
     @app.route('/test', methods=['GET'])
     def test_endpoint():
         return jsonify({"message": "Hello, world!"})
+
+    @app.route('/llm/test', methods=['POST'])
+    def llm_test():
+        data = request.get_json() or {}
+        lang = data.get('lang', 'Chinese')
+        text = data.get('text', 'Hello, this is a translation test.')
+        used_model = 'openai'
+        ark_key = os.getenv('ARK_API_KEY')
+        ark_model = (os.getenv('ARK_MODEL') or '').strip()
+        if ark_key and ark_model.startswith('ep-'):
+            used_model = ark_model
+        try:
+            chain = create_translation_chain_by_dk(lang)
+            translated = chain.run(text=text, lang=lang).strip()
+            in_tokens = count_tokens_accurate(text, chain, lang)
+            out_tokens = count_tokens_accurate(translated, chain, lang)
+            cost = compute_token_cost(in_tokens, out_tokens)
+            return jsonify({
+                'model': used_model,
+                'input_tokens': in_tokens,
+                'output_tokens': out_tokens,
+                'cost': cost,
+                'translated': translated
+            })
+        except Exception as e:
+            return jsonify({'error': str(e)}), 500
 
     @app.route('/upload', methods=['POST'])
     def upload_file():

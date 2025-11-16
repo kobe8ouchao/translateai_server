@@ -14,12 +14,10 @@ from langchain.chains import LLMChain
 from langchain.prompts import PromptTemplate
 
 
-from langchain_community.callbacks.manager import get_openai_callback
 from langchain_openai import ChatOpenAI
 import os
 import json
 import re
-from doc import create_translation_chain_by_dk
 
 def translate_text(text, source_lang, target_lang):
     # 创建 LLM
@@ -49,20 +47,41 @@ def translate_text(text, source_lang, target_lang):
 
 
 
-def count_tokens_accurate(text,llm,lang):
-    
-    with get_openai_callback() as cb:
+def count_tokens_accurate(text, llm_or_chain, lang):
+    try:
+        import tiktoken
+        enc = None
         try:
-            # 只调用 LLM 来获取 token 计数，不实际执行翻译
-            prompt = f"Text: {text}\nLanguage: {lang}"
-            llm.predict(
-                prompt
-            )
-            return cb.total_tokens
-        except Exception as e:
-            print(f"计算token时出错: {e}")
-            # 如果出错，回退到估算方法
-            return len(text) // 4
+            enc = tiktoken.get_encoding('cl100k_base')
+        except Exception:
+            enc = tiktoken.get_encoding('r50k_base')
+        if enc:
+            return max(1, len(enc.encode(text)))
+    except Exception as e:
+        print(f"计算token时出错: {e}")
+    return max(1, len(text.encode('utf-8')) // 4)
+
+def compute_token_cost(input_tokens, output_tokens):
+    try:
+        w_in = float(os.getenv('TOKEN_WEIGHT_IN', '1'))
+        w_out = float(os.getenv('TOKEN_WEIGHT_OUT', '1'))
+    except Exception:
+        w_in, w_out = 1.0, 1.0
+    return int(w_in * input_tokens + w_out * output_tokens)
+
+def consume_user_tokens(user_id, tokens_used):
+    try:
+        from db.schema import User
+        from bson import ObjectId
+        tokens_delta = int(tokens_used)
+        # 原子递减
+        User.objects(id=ObjectId(user_id)).update_one(dec__tokens=tokens_delta)
+        # 归零保护
+        User.objects(id=ObjectId(user_id), tokens__lt=0).update_one(set__tokens=0)
+        return True
+    except Exception as e:
+        print(f"更新用户token使用量时出错: {e}")
+        return False
 
 
 
@@ -79,6 +98,7 @@ def replace_text_in_txt(task_id, input_txt_path, output_txt_path, update_progres
         translated_paragraphs = []
         
         # 创建翻译链
+        from doc import create_translation_chain_by_dk
         translation_chain = create_translation_chain_by_dk(lang)
         # 用于计算token的变量
         total_tokens = 0
@@ -93,8 +113,9 @@ def replace_text_in_txt(task_id, input_txt_path, output_txt_path, update_progres
                     # 计算并累加token
                     input_tokens = count_tokens_accurate(paragraph.strip(),translation_chain,lang)
                     output_tokens = count_tokens_accurate(translated,translation_chain,lang)
-                    total_tokens += input_tokens + output_tokens
-                    print(f"Token number =========: {input_tokens + output_tokens}")
+                    cost = compute_token_cost(input_tokens, output_tokens)
+                    total_tokens += cost
+                    print(f"Token number =========: {cost}")
                 except Exception as e:
                     print(f"翻译段落时出错: {e}")
                     # 如果翻译失败，保留原文
@@ -122,24 +143,7 @@ def replace_text_in_txt(task_id, input_txt_path, output_txt_path, update_progres
                 pass
          # 更新用户tokens
         if user_id:
-            try:
-                from db.schema import User
-                from bson import ObjectId
-                user = User.objects(id=ObjectId(user_id)).first()
-                if user:
-                    # 确保tokens字段存在
-                    if not hasattr(user, 'tokens') or user.tokens is None:
-                        user.tokens = 5000
-                    
-                    # 减去使用的tokens
-                    user.tokens -= total_tokens
-                    if user.tokens < 0:
-                        user.tokens = 0
-                    
-                    user.save()
-                    print(f"用户 {user_id} 的tokens余额更新为: {user.tokens}，本次消耗: {total_tokens}")
-            except Exception as e:
-                print(f"更新用户token使用量时出错: {e}")
+            consume_user_tokens(user_id, total_tokens)
         update_progress(task_id, 100)
         return True
     except Exception as e:
@@ -155,6 +159,7 @@ def replace_text_in_json(task_id, input_json_path, output_json_path, update_prog
             content = json.load(file)
         
         # 创建翻译链
+        from doc import create_translation_chain_by_dk
         translation_chain = create_translation_chain_by_dk(lang)
         
         # 计算总项数（用于进度计算）
@@ -169,26 +174,8 @@ def replace_text_in_json(task_id, input_json_path, output_json_path, update_prog
         # 将翻译后的JSON写入新文件
         with open(output_json_path, 'w', encoding='utf-8') as file:
             json.dump(translated_content, file, ensure_ascii=False, indent=2)
-        # 更新用户tokens
         if user_id:
-            try:
-                from db.schema import User
-                from bson import ObjectId
-                user = User.objects(id=ObjectId(user_id)).first()
-                if user:
-                    # 确保tokens字段存在
-                    if not hasattr(user, 'tokens') or user.tokens is None:
-                        user.tokens = 5000
-                    
-                    # 减去使用的tokens
-                    user.tokens -= total_tokens[0]
-                    if user.tokens < 0:
-                        user.tokens = 0
-                    
-                    user.save()
-                    print(f"用户 {user_id} 的tokens余额更新为: {user.tokens}，本次消耗: {total_tokens[0]}")
-            except Exception as e:
-                print(f"更新用户token使用量时出错: {e}")
+            consume_user_tokens(user_id, total_tokens[0])
                 
         update_progress(task_id, 100)
         return True
@@ -225,7 +212,7 @@ def translate_json_object(obj, translation_chain, lang, task_id, total_items, tr
                     print(f"原文: {key.strip()}=========译文: {translated_key}")
                     input_tokens = count_tokens_accurate(key.strip(),translation_chain,lang)
                     output_tokens = count_tokens_accurate(translated_key,translation_chain,lang)
-                    total_tokens[0] += input_tokens + output_tokens
+                    total_tokens[0] += compute_token_cost(input_tokens, output_tokens)
                     print(f"Token number =========: {input_tokens + output_tokens}")
                     update_progress(task_id, (translated_items[0] / total_items) * 100)
                 except Exception as e:
@@ -245,7 +232,7 @@ def translate_json_object(obj, translation_chain, lang, task_id, total_items, tr
             # 计算并累加token
             input_tokens = count_tokens_accurate(obj.strip(),translation_chain,lang)
             output_tokens = count_tokens_accurate(translated,translation_chain,lang)
-            total_tokens[0] += input_tokens + output_tokens
+            total_tokens[0] += compute_token_cost(input_tokens, output_tokens)
             print(f"Token number =========: {input_tokens + output_tokens}")
             
             update_progress(task_id, (translated_items[0] / total_items) * 100)
@@ -313,6 +300,7 @@ def replace_text_in_markdown(task_id, input_md_path, output_md_path, update_prog
         translated_lines = []
         
         # 创建翻译链
+        from doc import create_translation_chain_by_dk
         translation_chain = create_translation_chain_by_dk(lang)
         
         # 逐行翻译，但保持空行和格式行不变
@@ -346,10 +334,9 @@ def replace_text_in_markdown(task_id, input_md_path, output_md_path, update_prog
                         translated_text = translation_chain.run(text=paragraph_text, lang=lang)
                         translated_lines.extend(translated_text.split('\n'))
                         print(f"原文: {paragraph_text}=========译文: {translated_text}")
-                         # 计算并累加token
                         input_tokens = count_tokens_accurate(paragraph_text,translation_chain,lang)
                         output_tokens = count_tokens_accurate(translated_text,translation_chain,lang)
-                        total_tokens += input_tokens + output_tokens
+                        total_tokens += compute_token_cost(input_tokens, output_tokens)
                         print(f"Token number =========: {input_tokens + output_tokens}")
                     except Exception as e:
                         print(f"翻译段落时出错: {e}")
@@ -382,10 +369,9 @@ def replace_text_in_markdown(task_id, input_md_path, output_md_path, update_prog
                 translated_text = translation_chain.run(text=paragraph_text, lang=lang)
                 translated_lines.extend(translated_text.split('\n'))
                 print(f"原文: {paragraph_text}=========译文: {translated_text}")
-                # 计算并累加token
                 input_tokens = count_tokens_accurate(paragraph_text,translation_chain,lang)
                 output_tokens = count_tokens_accurate(translated_text,translation_chain,lang)
-                total_tokens += input_tokens + output_tokens
+                total_tokens += compute_token_cost(input_tokens, output_tokens)
                 print(f"Token number =========: {input_tokens + output_tokens}")
             except Exception as e:
                 print(f"翻译段落时出错: {e}")
@@ -406,26 +392,8 @@ def replace_text_in_markdown(task_id, input_md_path, output_md_path, update_prog
                 on_write(translated_content)
             except Exception:
                 pass
-        # 更新用户tokens
         if user_id:
-            try:
-                from db.schema import User
-                from bson import ObjectId
-                user = User.objects(id=ObjectId(user_id)).first()
-                if user:
-                    # 确保tokens字段存在
-                    if not hasattr(user, 'tokens') or user.tokens is None:
-                        user.tokens = 5000
-                    
-                    # 减去使用的tokens
-                    user.tokens -= total_tokens
-                    if user.tokens < 0:
-                        user.tokens = 0
-                    
-                    user.save()
-                    print(f"用户 {user_id} 的tokens余额更新为: {user.tokens}，本次消耗: {total_tokens}")
-            except Exception as e:
-                print(f"更新用户token使用量时出错: {e}")
+            consume_user_tokens(user_id, total_tokens)
         update_progress(task_id, 100)
         return True
     except Exception as e:
@@ -437,6 +405,7 @@ def translate_txt_content(task_id, text, update_progress, lang, user_id=None):
         paragraphs = text.split('\n\n')
         total_paragraphs = len(paragraphs)
         translated_paragraphs = []
+        from doc import create_translation_chain_by_dk
         translation_chain = create_translation_chain_by_dk(lang)
         total_tokens = 0
         for i, paragraph in enumerate(paragraphs):
@@ -446,7 +415,7 @@ def translate_txt_content(task_id, text, update_progress, lang, user_id=None):
                     translated_paragraphs.append(translated)
                     input_tokens = count_tokens_accurate(paragraph.strip(), translation_chain, lang)
                     output_tokens = count_tokens_accurate(translated, translation_chain, lang)
-                    total_tokens += input_tokens + output_tokens
+                    total_tokens += compute_token_cost(input_tokens, output_tokens)
                 except Exception:
                     translated_paragraphs.append(paragraph)
             else:
@@ -455,19 +424,7 @@ def translate_txt_content(task_id, text, update_progress, lang, user_id=None):
             update_progress(task_id, progress)
         content = '\n\n'.join(translated_paragraphs)
         if user_id:
-            try:
-                from db.schema import User
-                from bson import ObjectId
-                user = User.objects(id=ObjectId(user_id)).first()
-                if user:
-                    if not hasattr(user, 'tokens') or user.tokens is None:
-                        user.tokens = 5000
-                    user.tokens -= total_tokens
-                    if user.tokens < 0:
-                        user.tokens = 0
-                    user.save()
-            except Exception:
-                pass
+            consume_user_tokens(user_id, total_tokens)
         update_progress(task_id, 100)
         return content
     except Exception:
@@ -475,25 +432,14 @@ def translate_txt_content(task_id, text, update_progress, lang, user_id=None):
         return text
 def translate_json_content(task_id, obj, update_progress, lang, user_id=None):
     try:
+        from doc import create_translation_chain_by_dk
         translation_chain = create_translation_chain_by_dk(lang)
         total_items = count_json_items(obj)
         translated_items = [0]
         total_tokens = [0]
         result = translate_json_object(obj, translation_chain, lang, task_id, total_items, translated_items, update_progress, total_tokens)
         if user_id:
-            try:
-                from db.schema import User
-                from bson import ObjectId
-                user = User.objects(id=ObjectId(user_id)).first()
-                if user:
-                    if not hasattr(user, 'tokens') or user.tokens is None:
-                        user.tokens = 5000
-                    user.tokens -= total_tokens[0]
-                    if user.tokens < 0:
-                        user.tokens = 0
-                    user.save()
-            except Exception:
-                pass
+            consume_user_tokens(user_id, total_tokens[0])
         update_progress(task_id, 100)
         return result
     except Exception:
@@ -535,6 +481,7 @@ def translate_markdown_content(task_id, content, update_progress, lang, user_id=
         lines = content.split('\n')
         total_lines = len(lines)
         translated_lines = []
+        from doc import create_translation_chain_by_dk
         translation_chain = create_translation_chain_by_dk(lang)
         current_paragraph = []
         i = 0
@@ -562,7 +509,7 @@ def translate_markdown_content(task_id, content, update_progress, lang, user_id=
                         translated_lines.extend(translated_text.split('\n'))
                         input_tokens = count_tokens_accurate(paragraph_text, translation_chain, lang)
                         output_tokens = count_tokens_accurate(translated_text, translation_chain, lang)
-                        total_tokens += input_tokens + output_tokens
+                        total_tokens += compute_token_cost(input_tokens, output_tokens)
                     except Exception:
                         translated_lines.extend(current_paragraph)
                     current_paragraph = []
@@ -579,26 +526,14 @@ def translate_markdown_content(task_id, content, update_progress, lang, user_id=
                 translated_lines.extend(translated_text.split('\n'))
                 input_tokens = count_tokens_accurate(paragraph_text, translation_chain, lang)
                 output_tokens = count_tokens_accurate(translated_text, translation_chain, lang)
-                total_tokens += input_tokens + output_tokens
+                total_tokens += compute_token_cost(input_tokens, output_tokens)
             except Exception:
                 translated_lines.extend(current_paragraph)
         translated_content = '\n'.join(translated_lines)
         for placeholder, original in placeholder_map.items():
             translated_content = translated_content.replace(placeholder, original)
         if user_id:
-            try:
-                from db.schema import User
-                from bson import ObjectId
-                user = User.objects(id=ObjectId(user_id)).first()
-                if user:
-                    if not hasattr(user, 'tokens') or user.tokens is None:
-                        user.tokens = 5000
-                    user.tokens -= total_tokens
-                    if user.tokens < 0:
-                        user.tokens = 0
-                    user.save()
-            except Exception:
-                pass
+            consume_user_tokens(user_id, total_tokens)
         update_progress(task_id, 100)
         return translated_content
     except Exception:
