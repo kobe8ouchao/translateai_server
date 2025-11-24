@@ -28,21 +28,26 @@ from alipay.aop.api.AlipayClientConfig import AlipayClientConfig
 from alipay.aop.api.DefaultAlipayClient import DefaultAlipayClient
 from alipay.aop.api.domain.AlipayTradeAppPayModel import AlipayTradeAppPayModel
 from alipay.aop.api.request.AlipayTradeAppPayRequest import AlipayTradeAppPayRequest
+from alipay.aop.api.domain.AlipayTradePrecreateModel import AlipayTradePrecreateModel
+from alipay.aop.api.domain.AlipayTradePagePayModel import AlipayTradePagePayModel
+from alipay.aop.api.request.AlipayTradePagePayRequest import AlipayTradePagePayRequest
+from alipay.aop.api.domain.AlipayTradeQueryModel import AlipayTradeQueryModel
+from alipay.aop.api.request.AlipayTradeQueryRequest import AlipayTradeQueryRequest
 from db.schema import Order
 import time
 from alipay.aop.api.util.SignatureUtils import verify_with_rsa
 from supabase import create_client, Client
 from dotenv import load_dotenv, find_dotenv
+load_dotenv(find_dotenv())
 import mimetypes
 import tempfile
 
 # 添加支付宝配置
-ALIPAY_APPID = os.getenv('ALIPAY_APPID', '你的支付宝APPID')
-ALIPAY_PUBLIC_KEY_PATH = os.getenv('ALIPAY_PUBLIC_KEY_PATH', '/path/to/alipay_public_key.pem')
-ALIPAY_PRIVATE_KEY_PATH = os.getenv('ALIPAY_PRIVATE_KEY_PATH', '/path/to/app_private_key.pem')
-ALIPAY_NOTIFY_URL = os.getenv('ALIPAY_NOTIFY_URL', 'http://your.domain/api/alipay/notify')
-ALIPAY_RETURN_URL = os.getenv('ALIPAY_RETURN_URL', 'http://your.domain/payment/result')
-
+ALIPAY_APPID = os.getenv('ALIPAY_APPID', '')
+ALIPAY_PUBLIC_KEY_PATH = os.getenv('ALIPAY_PUBLIC_KEY_PATH', '')
+ALIPAY_PRIVATE_KEY_PATH = os.getenv('ALIPAY_PRIVATE_KEY_PATH', '')
+ALIPAY_NOTIFY_URL = os.getenv('ALIPAY_NOTIFY_URL', '')
+ALIPAY_RETURN_URL = os.getenv('ALIPAY_RETURN_URL', '')
 # Google OAuth配置
 GOOGLE_CLIENT_ID = os.getenv('GOOGLE_CLIENT_ID', '')  # 需要替换为你的Google客户端ID
 GOOGLE_CLIENT_SECRET = os.getenv('GOOGLE_CLIENT_SECRET', '')  # 需要替换为你的Google客户端密钥
@@ -512,9 +517,16 @@ def init_router(app: Flask):
         try:
             user = User.objects(id=ObjectId(userId)).first()
             if user:
-                available = user.tokens if hasattr(user, 'tokens') and user.tokens is not None else 0
-                if required_tokens and available < required_tokens:
-                    return jsonify({'message': 'Insufficient tokens', 'required': required_tokens, 'available': available, 'task_id': task_id}), 402
+                # Check if user has active VIP status
+                is_vip = False
+                if user.vip == 1 and user.vip_expired_at:
+                    is_vip = user.vip_expired_at > datetime.datetime.now()
+                
+                # Skip token check for VIP users (unlimited translations)
+                if not is_vip:
+                    available = user.tokens if hasattr(user, 'tokens') and user.tokens is not None else 0
+                    if required_tokens and available < required_tokens:
+                        return jsonify({'message': 'Insufficient tokens', 'required': required_tokens, 'available': available, 'task_id': task_id}), 402
         except Exception as e:
             return jsonify({'message': 'Token check failed', 'error': str(e), 'task_id': task_id}), 500
 
@@ -1271,18 +1283,32 @@ def init_router(app: Flask):
         alipay_client_config.app_id = ALIPAY_APPID
         
         # 设置应用私钥
-        with open(ALIPAY_PRIVATE_KEY_PATH) as f:
-            app_private_key_string = f.read()
+        # 优先从环境变量读取（适用于Render等云平台）
+        app_private_key_string = os.getenv('ALIPAY_PRIVATE_KEY')
+        if not app_private_key_string:
+            # 如果环境变量不存在，从文件读取（本地开发）
+            print("从文件读取私钥:", ALIPAY_PRIVATE_KEY_PATH)
+            with open(ALIPAY_PRIVATE_KEY_PATH) as f:
+                app_private_key_string = f.read()
+        else:
+            print("从环境变量读取私钥")
         alipay_client_config.app_private_key = app_private_key_string
         
         # 设置支付宝公钥
-        with open(ALIPAY_PUBLIC_KEY_PATH) as f:
-            alipay_public_key_string = f.read()
+        # 优先从环境变量读取
+        alipay_public_key_string = os.getenv('ALIPAY_PUBLIC_KEY')
+        if not alipay_public_key_string:
+            # 如果环境变量不存在，从文件读取
+            print("从文件读取公钥:", ALIPAY_PUBLIC_KEY_PATH)
+            with open(ALIPAY_PUBLIC_KEY_PATH) as f:
+                alipay_public_key_string = f.read()
+        else:
+            print("从环境变量读取公钥")
         alipay_client_config.alipay_public_key = alipay_public_key_string
         
         # 设置签名类型
         alipay_client_config.sign_type = "RSA2"
-        
+        print("alipay_client_config content======", alipay_client_config.__dict__)
         # 创建AlipayClient
         alipay = DefaultAlipayClient(alipay_client_config)
         return alipay
@@ -1290,14 +1316,19 @@ def init_router(app: Flask):
     @app.route('/create-alipay-order', methods=['POST'])
     def create_alipay_order():
         """
-        创建支付宝订单
+        创建支付宝二维码订单
         """
         try:
             data = request.get_json()
             user_id = data.get('userId')
-            order_type = data.get('type')  # consumption 或 subscription
+            plan_name = data.get('planName')
+            price = data.get('price')  # 价格字符串，如 "$9.99"
+            period = data.get('period')  # 周期，如 "/mo"
+            order_type = data.get('orderType') # consumption 或 subscription
             
-            if not user_id or not order_type:
+            print(f"创建订单参数: user_id={user_id}, plan={plan_name}, price={price}, type={order_type}")
+            
+            if not user_id:
                 return jsonify({"error": "参数不完整"}), 400
             
             # 验证用户
@@ -1305,9 +1336,30 @@ def init_router(app: Flask):
             if not user:
                 return jsonify({"error": "用户不存在"}), 404
             
-            # 设置订单金额
-            amount = 9.99 if order_type == 'consumption' else 49.90
             
+            # Check if user has active VIP status
+            is_vip = False
+            if user.vip == 1 and user.vip_expired_at:
+                is_vip = user.vip_expired_at > datetime.datetime.now()
+            
+            # 解析价格
+            if price:
+                amount = float(price.replace('$', '').replace(',', ''))
+            else:
+                # 如果没有传价格，根据 order_type 设置默认值 (兼容旧逻辑)
+                amount = 0.99 if order_type == 'consumption' else 49.90
+            
+            # Prevent VIP users from purchasing the basic $0.99 plan
+            if is_vip and amount < 10:  # Basic plan is less than $10
+                return jsonify({
+                    "error": "VIP用户无法购买基础套餐，您已拥有专业版订阅",
+                    "code": "VIP_RESTRICTION"
+                }), 403
+            
+            # 如果没有传 plan_name，设置默认值
+            if not plan_name:
+                plan_name = '基础充值' if order_type == 'consumption' else '专业版订阅'
+
             # 生成订单号
             order_no = f"ORDER_{int(time.time())}_{user_id[-6:]}"
             
@@ -1316,7 +1368,9 @@ def init_router(app: Flask):
                 user=user,
                 order_no=order_no,
                 amount=amount,
-                type=order_type,
+                plan_name=plan_name,
+                period=period,
+                type=order_type or ('consumption' if amount < 20 else 'subscription'),
                 status='pending'
             )
             order.save()
@@ -1324,43 +1378,52 @@ def init_router(app: Flask):
             # 初始化支付宝客户端
             alipay = init_alipay()
             
-            # 生成支付链接
-            # 创建 AlipayTradeAppPayModel 并设置参数
-            model = AlipayTradeAppPayModel()
+            # 创建电脑网站支付请求
+            model = AlipayTradePagePayModel()
             model.out_trade_no = order_no
             model.total_amount = str(amount)
-            model.subject = f"{'消耗性充值' if order_type == 'consumption' else '月度订阅'} - {order_no}"
-            model.product_code = "QUICK_MSECURITY_PAY"
+            model.subject = f"{plan_name} - {price or amount}"
+            model.product_code = "FAST_INSTANT_TRADE_PAY"
             
-            # 创建 AlipayTradeAppPayRequest 对象
-            request_obj = AlipayTradeAppPayRequest()
+            request_obj = AlipayTradePagePayRequest()
             request_obj.notify_url = ALIPAY_NOTIFY_URL
             request_obj.return_url = ALIPAY_RETURN_URL
             request_obj.biz_model = model
             
-            # 调用支付接口
-            response = alipay.execute(request_obj)
-            order_string = response.body
+            # 调用接口，获取支付页面URL
+            response = alipay.page_execute(request_obj, http_method="GET")
             
-            # 生成完整的支付链接
-            pay_url = f"https://openapi.alipay.com/gateway.do?{order_string}"
-            
+            # page_execute 返回的是完整的URL字符串
             return jsonify({
                 "code": 200,
                 "message": "订单创建成功",
                 "data": {
-                    "order_no": order_no,
+                    "orderId": order_no,
                     "amount": amount,
-                    "pay_url": pay_url
+                    "paymentUrl": response  # 返回支付URL供前端跳转
                 }
             })
             
         except Exception as e:
+            print(f"创建支付宝订单异常: {str(e)}")
             return jsonify({
-                "code": 500,
-                "message": f"创建订单失败: {str(e)}",
-                "data": None
+                "error": f"创建订单失败: {str(e)}"
             }), 500
+
+    def calculate_tokens(amount, plan_name):
+        """根据金额和套餐计算 tokens"""
+        # 基础套餐: $0.99 = 10,000 tokens
+        # 专业套餐: $49 = 100,000 tokens
+        if not plan_name:
+            return int(amount * 1000)
+        if 'basic' in plan_name.lower():
+            return 10000
+        elif 'professional' in plan_name.lower():
+            return 100000
+        elif 'enterprise' in plan_name.lower():
+            return int(amount * 2000)
+        else:
+            return int(amount * 1000)
 
     @app.route('/alipay/notify', methods=['POST'])
     def alipay_notify():
@@ -1401,19 +1464,134 @@ def init_router(app: Flask):
                     
                     # 更新用户额度
                     user = order.user
-                    if order.type == "consumption":
-                        user.tokens = (user.tokens or 0) + 5000  # 假设9.99获得5000 tokens
-                    else:  # subscription
-                        user.vip = True
+                    tokens_to_add = calculate_tokens(order.amount, order.plan_name or '')
+                    user.tokens = (user.tokens or 0) + tokens_to_add
+                    
+                    # 如果是订阅套餐，更新 VIP
+                    if order.type == 'subscription' or 'professional' in (order.plan_name or '').lower():
+                        user.vip = 1
+                        user.vip_expired_at = datetime.datetime.now() + datetime.timedelta(days=30)
+                    
                     user.save()
                     
                 return "success"
-            return "fail"
+            return jsonify({"message": "success"}), 200
+        except Exception as e:
+            print(f"支付宝通知处理异常: {str(e)}")
+            return jsonify({"message": "fail"}), 500
+
+    @app.route('/alipay/return', methods=['GET'])
+    def alipay_return():
+        """
+        支付宝同步返回处理（用户支付完成后跳转）
+        """
+        try:
+            # 获取所有GET参数
+            data = request.args.to_dict()
+            
+            # 验证签名（可选，主要依赖异步通知）
+            # 这里简化处理，直接重定向到前端成功页面
+            # 实际支付状态以异步通知为准
+            
+            out_trade_no = data.get('out_trade_no')
+            trade_no = data.get('trade_no')
+            
+            # 重定向到前端支付成功页面
+            frontend_url = os.getenv('FRONTEND_URL', 'http://localhost:5173')
+            return redirect(f"{frontend_url}/payment/success?orderId={out_trade_no}&tradeNo={trade_no}")
             
         except Exception as e:
-            print(f"处理支付回调时出错: {str(e)}")
-            return "fail"
-        
+            print(f"支付宝返回处理异常: {str(e)}")
+            frontend_url = os.getenv('FRONTEND_URL', 'http://localhost:5173')
+            return redirect(f"{frontend_url}/payment/success")
+
+    @app.route('/check-alipay-status', methods=['GET'])
+    def check_alipay_status():
+        """
+        查询支付宝订单状态
+        """
+        try:
+            order_id = request.args.get('orderId')
+            if not order_id:
+                return jsonify({"error": "订单号不能为空"}), 400
+            
+            # 查询订单
+            order = Order.objects(order_no=order_id).first()
+            if not order:
+                return jsonify({"error": "订单不存在"}), 404
+            
+            # 如果订单已支付，直接返回
+            if order.status == 'paid':
+                return jsonify({
+                    "code": 200,
+                    "paid": True,
+                    "data": {
+                        "orderId": order_id,
+                        "status": "paid"
+                    }
+                })
+            
+            # 调用支付宝接口查询订单状态
+            alipay = init_alipay()
+            model = AlipayTradeQueryModel()
+            model.out_trade_no = order_id
+            
+            request_obj = AlipayTradeQueryRequest()
+            request_obj.biz_model = model
+            
+            response = alipay.execute(request_obj)
+            response_json = json.loads(response)
+            
+            # 兼容处理：有些情况下返回的 JSON 没有 alipay_trade_query_response 包装
+            response_data = response_json.get('alipay_trade_query_response', response_json)
+            
+            if response_data.get('code') == '10000':
+                trade_status = response_data.get('trade_status')
+                
+                # 如果支付成功，更新订单和用户信息
+                if trade_status in ('TRADE_SUCCESS', 'TRADE_FINISHED'):
+                    if order.status == 'pending':
+                        order.status = 'paid'
+                        order.paid_at = datetime.datetime.now()
+                        order.trade_no = response_data.get('trade_no')
+                        order.save()
+                        
+                        # 更新用户 tokens
+                        user = order.user
+                        tokens_to_add = calculate_tokens(order.amount, order.plan_name or '')
+                        user.tokens = (user.tokens or 0) + tokens_to_add
+                        
+                        # 如果是订阅套餐，更新 VIP 状态
+                        if order.type == 'subscription' or 'professional' in (order.plan_name or '').lower():
+                            user.vip = 1
+                            user.vip_expired_at = datetime.datetime.now() + datetime.timedelta(days=30)
+                        
+                        user.save()
+                    
+                    return jsonify({
+                        "code": 200,
+                        "paid": True,
+                        "data": {
+                            "orderId": order_id,
+                            "status": "paid"
+                        }
+                    })
+                else:
+                    return jsonify({
+                        "code": 200,
+                        "paid": False,
+                        "data": {
+                            "orderId": order_id,
+                            "status": trade_status
+                        }
+                    })
+            else:
+                return jsonify({"error": "查询订单状态失败"}), 500
+                
+        except Exception as e:
+            print(f"查询订单失败: {str(e)}")
+            return jsonify({"error": f"查询订单失败: {str(e)}"}), 500
+
     @app.route('/create-stripe-payment-intent', methods=['POST'])
     def create_stripe_payment_intent():
         try:

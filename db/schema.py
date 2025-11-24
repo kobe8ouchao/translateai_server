@@ -90,6 +90,8 @@ class Order(Document):
     user = ReferenceField('User', required=True)
     order_no = StringField(required=True, unique=True)
     amount = FloatField(required=True)
+    plan_name = StringField()  # 套餐名称
+    period = StringField()  # 周期，如 "/mo" 或 "/10k Tokens"
     type = StringField(required=True, choices=['consumption', 'subscription'])  # consumption: 消耗性, subscription: 订阅
     status = StringField(required=True, default='pending', 
                         choices=['pending', 'paid', 'failed', 'cancelled'])  # pending: 待支付, paid: 已支付, failed: 支付失败, cancelled: 已取消
