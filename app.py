@@ -489,46 +489,47 @@ def init_router(app: Flask):
         if fileType in ('pdf', 'word'):
             with open(input_file_path, 'wb') as f:
                 f.write(data_bytes)
-        required_tokens = int(os.getenv('MIN_TOKENS_REQUIRED', '0'))
-        try:
-            if fileType == 'txt':
-                text = data_bytes.decode('utf-8', errors='ignore')
-                in_toks = count_tokens_accurate(text, None, lang)
-                out_toks = in_toks
-                required_tokens = max(required_tokens, compute_token_cost(in_toks, out_toks))
-            elif fileType == 'json':
-                text = data_bytes.decode('utf-8', errors='ignore')
-                in_toks = count_tokens_accurate(text, None, lang)
-                out_toks = in_toks
-                required_tokens = max(required_tokens, compute_token_cost(in_toks, out_toks))
-            elif fileType == 'markdown':
-                text = data_bytes.decode('utf-8', errors='ignore')
-                in_toks = count_tokens_accurate(text, None, lang)
-                out_toks = in_toks
-                required_tokens = max(required_tokens, compute_token_cost(in_toks, out_toks))
-            elif fileType == 'pdf':
-                words = count_total_words(input_file_path)
-                required_tokens = max(required_tokens, compute_token_cost(words, words))
-            elif fileType == 'word':
-                approx = max(1, len(data_bytes) // 4)
-                required_tokens = max(required_tokens, compute_token_cost(approx, approx))
-        except Exception:
-            pass
-        try:
-            user = User.objects(id=ObjectId(userId)).first()
-            if user:
-                # Check if user has active VIP status
-                is_vip = False
-                if user.vip == 1 and user.vip_expired_at:
-                    is_vip = user.vip_expired_at > datetime.datetime.now()
+        # required_tokens = int(os.getenv('MIN_TOKENS_REQUIRED', '0'))
+        # try:
+        #     if fileType == 'txt':
+        #         text = data_bytes.decode('utf-8', errors='ignore')
+        #         in_toks = count_tokens_accurate(text, None, lang)
+        #         out_toks = in_toks
+        #         required_tokens = max(required_tokens, compute_token_cost(in_toks, out_toks))
+        #     elif fileType == 'json':
+        #         text = data_bytes.decode('utf-8', errors='ignore')
+        #         in_toks = count_tokens_accurate(text, None, lang)
+        #         out_toks = in_toks
+        #         required_tokens = max(required_tokens, compute_token_cost(in_toks, out_toks))
+        #     elif fileType == 'markdown':
+        #         text = data_bytes.decode('utf-8', errors='ignore')
+        #         in_toks = count_tokens_accurate(text, None, lang)
+        #         out_toks = in_toks
+        #         required_tokens = max(required_tokens, compute_token_cost(in_toks, out_toks))
+        #     elif fileType == 'pdf':
+        #         words = count_total_words(input_file_path)
+        #         required_tokens = max(required_tokens, compute_token_cost(words, words))
+        #     elif fileType == 'word':
+        #         approx = max(1, len(data_bytes) // 4)
+        #         required_tokens = max(required_tokens, compute_token_cost(approx, approx))
+        # except Exception:
+        #     print(Exception)
+        #     pass
+        # try:
+        #     user = User.objects(id=ObjectId(userId)).first()
+        #     if user:
+        #         # Check if user has active VIP status
+        #         is_vip = False
+        #         if user.vip == 1 and user.vip_expired_at:
+        #             is_vip = user.vip_expired_at > datetime.datetime.now()
                 
-                # Skip token check for VIP users (unlimited translations)
-                if not is_vip:
-                    available = user.tokens if hasattr(user, 'tokens') and user.tokens is not None else 0
-                    if required_tokens and available < required_tokens:
-                        return jsonify({'message': 'Insufficient tokens', 'required': required_tokens, 'available': available, 'task_id': task_id}), 402
-        except Exception as e:
-            return jsonify({'message': 'Token check failed', 'error': str(e), 'task_id': task_id}), 500
+        #         # Skip token check for VIP users (unlimited translations)
+        #         if not is_vip:
+        #             available = user.tokens if hasattr(user, 'tokens') and user.tokens is not None else 0
+        #             if required_tokens and available < required_tokens:
+        #                 return jsonify({'message': 'Insufficient tokens', 'required': required_tokens, 'available': available, 'task_id': task_id}), 402
+        # except Exception as e:
+        #     return jsonify({'message': 'Token check failed', 'error': str(e), 'task_id': task_id}), 500
 
         def run_and_upload():
             try:
