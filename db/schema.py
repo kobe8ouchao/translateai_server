@@ -121,3 +121,14 @@ class Order(Document):
         ]
     }
 
+class OAuthState(Document):
+    state = StringField(required=True, unique=True)
+    created_at = DateTimeField(default=datetime.datetime.now)
+    
+    meta = {
+        'collection': 'oauth_states',
+        'indexes': [
+            {'fields': ['created_at'], 'expireAfterSeconds': 600}  # 10分钟后自动删除
+        ]
+    }
+
