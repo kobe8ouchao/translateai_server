@@ -34,6 +34,7 @@ from alipay.aop.api.request.AlipayTradePagePayRequest import AlipayTradePagePayR
 from alipay.aop.api.domain.AlipayTradeQueryModel import AlipayTradeQueryModel
 from alipay.aop.api.request.AlipayTradeQueryRequest import AlipayTradeQueryRequest
 from db.schema import Order
+from db.schema import OAuthState
 import time
 from alipay.aop.api.util.SignatureUtils import verify_with_rsa
 from supabase import create_client, Client
@@ -861,8 +862,9 @@ def init_router(app: Flask):
     def google_auth():
         # 生成随机state参数防止CSRF攻击
         state = secrets.token_hex(16)
-        session['oauth_state'] = state
-        print("session oauth_state",state)
+        # 改动：存储到MongoDB而不是session
+        OAuthState(state=state).save()
+        print("Generated state:", state)
         # 构建Google OAuth授权URL
         auth_url = "https://accounts.google.com/o/oauth2/v2/auth"
         params = {
@@ -885,10 +887,19 @@ def init_router(app: Flask):
         # 获取授权码和state
         code = request.args.get('code')
         state = request.args.get('state')
-        print("/auth/google/callback",code,state)
         # 验证state防止CSRF攻击
-        if state != session.get('oauth_state'):
+        print("/auth/google/callback - code:", code, "state:", state)
+    
+        # 改动：从MongoDB验证state
+        oauth_state = OAuthState.objects(state=state).first()
+    
+        if not oauth_state:
+            print("ERROR: State not found in database!")
             return jsonify({"error": "Invalid state parameter"}), 400
+    
+        # 验证通过后立即删除，防止重放攻击
+        oauth_state.delete()
+        print("State validated and deleted")
         
         # 使用授权码获取访问令牌
         token_url = "https://oauth2.googleapis.com/token"
