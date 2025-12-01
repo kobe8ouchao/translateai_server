@@ -862,7 +862,7 @@ def init_router(app: Flask):
         # 生成随机state参数防止CSRF攻击
         state = secrets.token_hex(16)
         session['oauth_state'] = state
-        
+        print("session oauth_state",state)
         # 构建Google OAuth授权URL
         auth_url = "https://accounts.google.com/o/oauth2/v2/auth"
         params = {
@@ -885,7 +885,7 @@ def init_router(app: Flask):
         # 获取授权码和state
         code = request.args.get('code')
         state = request.args.get('state')
-        print(code,state)
+        print("/auth/google/callback",code,state)
         # 验证state防止CSRF攻击
         if state != session.get('oauth_state'):
             return jsonify({"error": "Invalid state parameter"}), 400
