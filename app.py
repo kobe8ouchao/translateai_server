@@ -1617,7 +1617,7 @@ def init_router(app: Flask):
             order_type = data.get('orderType') or 'consumption'
             email = data.get('email') or ''
             request_id = data.get('requestId') or ''
-            session_id = data.get('sessionId') or ''
+            
             if not user_id:
                 return jsonify({"error": "参数不完整"}), 400
             user = User.objects(id=ObjectId(user_id)).first()
@@ -1642,38 +1642,14 @@ def init_router(app: Flask):
                 status='pending'
             )
             order.save()
-            if session_id:
-                order.trade_no = session_id
-                order.save()
-                return jsonify({
-                    "code": 200,
-                    "message": "订单创建成功",
-                    "data": {"orderId": order_no}
-                })
-            payload = {
-                "currency": "USD",
-                "amount": int(round(amount * 100)),
-                "description": f"{plan_name} - {amount}",
-                "metadata": {"order_no": order_no, "user_id": str(user.id), "period": period or '', "requestId": request_id},
-                "success_url": os.getenv('CREEM_SUCCESS_URL', os.getenv('FRONTEND_URL', 'http://localhost:5173') + '/payment/success'),
-                "cancel_url": os.getenv('CREEM_CANCEL_URL', os.getenv('FRONTEND_URL', 'http://localhost:5173') + '/payment')
-            }
-            if email:
-                payload["customer"] = {"email": email}
-            if request_id:
-                payload["requestId"] = request_id
-            headers = {"Authorization": f"Bearer {CREEM_API_KEY}", "Content-Type": "application/json"}
-            resp = requests.post(f"{CREEM_API_BASE}/v1/checkout/sessions", headers=headers, data=json.dumps(payload))
-            data_json = resp.json() if resp.content else {}
-            if 200 <= resp.status_code < 300 and data_json.get('url'):
-                order.trade_no = data_json.get('id') or order.trade_no
-                order.save()
-                return jsonify({
-                    "code": 200,
-                    "message": "订单创建成功",
-                    "data": {"orderId": order_no, "checkoutUrl": data_json.get('url')}
-                })
-            return jsonify({"error": data_json.get('error') or 'Creem创建订单失败'}), 500
+            
+            order.trade_no = request_id
+            order.save()
+            return jsonify({
+                "code": 200,
+                "message": "订单创建成功",
+                "data": {"orderId": order_no}
+            })
         except Exception as e:
             return jsonify({"error": f"创建订单失败: {str(e)}"}), 500
 
@@ -1684,28 +1660,7 @@ def init_router(app: Flask):
             if not order_id:
                 return jsonify({"error": "订单号不能为空"}), 400
             order = Order.objects(order_no=order_id).first()
-            if not order:
-                return jsonify({"error": "订单不存在"}), 404
-            if order.status == 'paid':
-                return jsonify({"code": 200, "data": {"orderId": order_id, "status": "paid"}})
-            headers = {"Authorization": f"Bearer {CREEM_API_KEY}"}
-            session_id = order.trade_no or order_id
-            resp = requests.get(f"{CREEM_API_BASE}/v1/checkout/sessions/{session_id}", headers=headers)
-            data_json = resp.json() if resp.content else {}
-            status_val = data_json.get('status') or data_json.get('payment_status')
-            if status_val == 'paid':
-                order.status = 'paid'
-                order.paid_at = datetime.datetime.now()
-                order.trade_no = data_json.get('id') or order.trade_no
-                order.save()
-                user = order.user
-                tokens_to_add = calculate_tokens(order.amount, order.plan_name or '')
-                user.tokens = (user.tokens or 0) + tokens_to_add
-                if order.type == 'subscription' or 'professional' in (order.plan_name or '').lower():
-                    user.vip = 1
-                    user.vip_expired_at = datetime.datetime.now() + datetime.timedelta(days=30)
-                user.save()
-                return jsonify({"code": 200, "data": {"orderId": order_id, "status": "paid"}})
+            
             return jsonify({"code": 200, "data": {"orderId": order_id, "status": status_val or 'pending'}})
         except Exception as e:
             return jsonify({"error": f"查询订单失败: {str(e)}"}), 500
