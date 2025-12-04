@@ -1605,7 +1605,7 @@ def init_router(app: Flask):
         except Exception as e:
             print(f"查询订单失败: {str(e)}")
             return jsonify({"error": f"查询订单失败: {str(e)}"}), 500
-
+            
     @app.route('/create-creem-order', methods=['POST'])
     def create_creem_order():
         try:
@@ -1617,7 +1617,6 @@ def init_router(app: Flask):
             order_type = data.get('orderType') or 'consumption'
             email = data.get('email') or ''
             request_id = data.get('requestId') or ''
-            
             if not user_id:
                 return jsonify({"error": "参数不完整"}), 400
             user = User.objects(id=ObjectId(user_id)).first()
@@ -1642,14 +1641,37 @@ def init_router(app: Flask):
                 status='pending'
             )
             order.save()
+            payload = {
+                "product_id": "prod_1234567890",
+                "units": 1,
+                "customer": {
+                    "id": user_id,
+                    "email": email
+                },
+                "amount": int(round(amount * 100)),
+                "description": f"{plan_name} - {amount}",
+                "metadata": {"order_no": order_no, "user_id": str(user.id), "period": period or '', "requestId": request_id},
+                "success_url": os.getenv('CREEM_SUCCESS_URL', os.getenv('FRONTEND_URL', 'http://localhost:5173') + '/payment/success'),
+                "cancel_url": os.getenv('CREEM_CANCEL_URL', os.getenv('FRONTEND_URL', 'http://localhost:5173') + '/payment')
+            }
+            if email:
+                payload["customer"] = {"email": email}
+            if request_id:
+                payload["requestId"] = request_id
+            headers = {"x-api-key":"creem_test_5AV549srVAESSDiNJ8Ne42", "Content-Type": "application/json"}
+            resp = requests.post("https://test-api.creem.io/v1/checkouts", headers=headers, data=json.dumps(payload))
+            data_json = resp.json() if resp.content else {}
+            if 200 == resp.status_code :
+                print(f"Creem创建订单成功: {data_json}")
+                order.trade_no = data_json.get('id') or order.trade_no
+                order.save()
+                return jsonify({
+                    "code": 200,
+                    "message": "订单创建成功",
+                    "data": {"orderId": order_no, "checkout_url": data_json.get('checkout_url')}
+                })
+            return jsonify({"error": data_json.get('error') or 'Creem创建订单失败'}), 500
             
-            order.trade_no = request_id
-            order.save()
-            return jsonify({
-                "code": 200,
-                "message": "订单创建成功",
-                "data": {"orderId": order_no}
-            })
         except Exception as e:
             return jsonify({"error": f"创建订单失败: {str(e)}"}), 500
 
