@@ -1641,14 +1641,6 @@ def init_router(app: Flask):
                 status='pending'
             )
             order.save()
-            if session_id:
-                order.trade_no = session_id
-                order.save()
-                return jsonify({
-                    "code": 200,
-                    "message": "订单创建成功",
-                    "data": {"orderId": order_no}
-                })
             payload = {
                 "product_id": "prod_1234567890",
                 "units": 1,
@@ -1679,6 +1671,7 @@ def init_router(app: Flask):
                     "data": {"orderId": order_no, "checkout_url": data_json.get('checkout_url')}
                 })
             return jsonify({"error": data_json.get('error') or 'Creem创建订单失败'}), 500
+            
         except Exception as e:
             return jsonify({"error": f"创建订单失败: {str(e)}"}), 500
 
@@ -1689,28 +1682,7 @@ def init_router(app: Flask):
             if not order_id:
                 return jsonify({"error": "订单号不能为空"}), 400
             order = Order.objects(order_no=order_id).first()
-            if not order:
-                return jsonify({"error": "订单不存在"}), 404
-            if order.status == 'paid':
-                return jsonify({"code": 200, "data": {"orderId": order_id, "status": "paid"}})
-            headers = {"Authorization": f"Bearer {CREEM_API_KEY}"}
-            session_id = order.trade_no or order_id
-            resp = requests.get(f"{CREEM_API_BASE}/v1/checkout/sessions/{session_id}", headers=headers)
-            data_json = resp.json() if resp.content else {}
-            status_val = data_json.get('status') or data_json.get('payment_status')
-            if status_val == 'paid':
-                order.status = 'paid'
-                order.paid_at = datetime.datetime.now()
-                order.trade_no = data_json.get('id') or order.trade_no
-                order.save()
-                user = order.user
-                tokens_to_add = calculate_tokens(order.amount, order.plan_name or '')
-                user.tokens = (user.tokens or 0) + tokens_to_add
-                if order.type == 'subscription' or 'professional' in (order.plan_name or '').lower():
-                    user.vip = 1
-                    user.vip_expired_at = datetime.datetime.now() + datetime.timedelta(days=30)
-                user.save()
-                return jsonify({"code": 200, "data": {"orderId": order_id, "status": "paid"}})
+            
             return jsonify({"code": 200, "data": {"orderId": order_id, "status": status_val or 'pending'}})
         except Exception as e:
             return jsonify({"error": f"查询订单失败: {str(e)}"}), 500
