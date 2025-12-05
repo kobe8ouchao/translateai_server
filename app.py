@@ -1479,13 +1479,11 @@ def init_router(app: Flask):
                     # 更新用户额度
                     user = order.user
                     tokens_to_add = calculate_tokens(order.amount, order.plan_name or '')
-                    user.tokens = (user.tokens or 0) + tokens_to_add
-                    
+                    user.tokens = (user.tokens or 0) + tokens_to_add                    
                     # 如果是订阅套餐，更新 VIP
                     if order.type == 'subscription' or 'professional' in (order.plan_name or '').lower():
                         user.vip = 1
-                        user.vip_expired_at = datetime.datetime.now() + datetime.timedelta(days=30)
-                    
+                        user.vip_expired_at = datetime.datetime.now() + datetime.timedelta(days=30)             
                     user.save()
                     
                 return "success"
@@ -1641,16 +1639,13 @@ def init_router(app: Flask):
                 status='pending'
             )
             order.save()
+            product_id = 'prod_XlAma9AGSGBqo6PSLZyyy' if order_type == 'consumption' else 'prod_17TG6tSx0LUkfaXQcDkIMF'
             payload = {
-                "product_id": "prod_1234567890",
-                "units": 1,
+                "product_id": product_id,
+                "request_id": request_id,
                 "customer": {
-                    "id": user_id,
                     "email": email
                 },
-                "amount": int(round(amount * 100)),
-                "description": f"{plan_name} - {amount}",
-                "metadata": {"order_no": order_no, "user_id": str(user.id), "period": period or '', "requestId": request_id},
                 "success_url": os.getenv('CREEM_SUCCESS_URL', os.getenv('FRONTEND_URL', 'http://localhost:5173') + '/payment/success'),
                 "cancel_url": os.getenv('CREEM_CANCEL_URL', os.getenv('FRONTEND_URL', 'http://localhost:5173') + '/payment')
             }
@@ -1658,17 +1653,16 @@ def init_router(app: Flask):
                 payload["customer"] = {"email": email}
             if request_id:
                 payload["requestId"] = request_id
-            headers = {"x-api-key":"creem_test_5AV549srVAESSDiNJ8Ne42", "Content-Type": "application/json"}
-            resp = requests.post("https://test-api.creem.io/v1/checkouts", headers=headers, data=json.dumps(payload))
+            headers = {"x-api-key":"creem_1o4YTsCdCfWVIkFWUfZNOB", "Content-Type": "application/json"}
+            resp = requests.post("https://api.creem.io/v1/checkouts", headers=headers, data=json.dumps(payload))
             data_json = resp.json() if resp.content else {}
             if 200 == resp.status_code :
                 print(f"Creem创建订单成功: {data_json}")
-                order.trade_no = data_json.get('id') or order.trade_no
                 order.save()
                 return jsonify({
                     "code": 200,
                     "message": "订单创建成功",
-                    "data": {"orderId": order_no, "checkout_url": data_json.get('checkout_url')}
+                    "data": {"orderId": order.trade_no,"check_id":data_json.get('id'), "checkout_url": data_json.get('checkout_url')}
                 })
             return jsonify({"error": data_json.get('error') or 'Creem创建订单失败'}), 500
             
@@ -1678,10 +1672,33 @@ def init_router(app: Flask):
     @app.route('/check-creem-status', methods=['GET'])
     def check_creem_status():
         try:
+            check_id = request.args.get('checkId')
             order_id = request.args.get('orderId')
-            if not order_id:
+            if not check_id:
                 return jsonify({"error": "订单号不能为空"}), 400
-            order = Order.objects(order_no=order_id).first()
+            url = f"https://api.creem.io/v1/checkouts/{check_id}"
+            headers = {"x-api-key": "creem_1o4YTsCdCfWVIkFWUfZNOB"}
+            response = requests.get(url, headers=headers)
+            if 200 == response.status_code:
+                data_json = response.json()
+                status_val = data_json.get('status')
+                if status_val == 'completed':
+                    # 查询订单
+                    order = Order.objects(trade_no=order_id).first()
+                    if not order:
+                        return jsonify({"error": "订单不存在"}), 404                   
+                    # 更新用户 tokens
+                    user = order.user
+                    tokens_to_add = calculate_tokens(order.amount, order.plan_name or '')
+                    user.tokens = (user.tokens or 0) + tokens_to_add
+                    
+                    # 如果是订阅套餐，更新 VIP 状态
+                    if order.type == 'subscription' or 'professional' in (order.plan_name or '').lower():
+                        user.vip = 1
+                        user.vip_expired_at = datetime.datetime.now() + datetime.timedelta(days=30)
+                    
+                    user.save()
+                    return jsonify({"code": 200, "message": "订单处理成功", "data": {"orderId": order_id, "tokens": tokens_to_add,"status": 'paid'}})
             
             return jsonify({"code": 200, "data": {"orderId": order_id, "status": status_val or 'pending'}})
         except Exception as e:
