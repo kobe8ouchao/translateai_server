@@ -1651,7 +1651,7 @@ def init_router(app: Flask):
             if email:
                 payload["customer"] = {"email": email}
             if request_id:
-                payload["requestId"] = request_id
+                payload["request_id"] = request_id
             headers = {"x-api-key":"creem_1o4YTsCdCfWVIkFWUfZNOB", "Content-Type": "application/json"}
             resp = requests.post("https://api.creem.io/v1/checkouts", headers=headers, data=json.dumps(payload))
             data_json = resp.json()
