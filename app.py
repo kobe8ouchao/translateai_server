@@ -1647,7 +1647,6 @@ def init_router(app: Flask):
                     "email": email
                 },
                 "success_url": os.getenv('CREEM_SUCCESS_URL', os.getenv('FRONTEND_URL', 'http://localhost:5173') + '/payment/success'),
-                "cancel_url": os.getenv('CREEM_CANCEL_URL', os.getenv('FRONTEND_URL', 'http://localhost:5173') + '/payment')
             }
             if email:
                 payload["customer"] = {"email": email}
