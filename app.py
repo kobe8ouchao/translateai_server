@@ -1655,7 +1655,7 @@ def init_router(app: Flask):
                 payload["requestId"] = request_id
             headers = {"x-api-key":"creem_1o4YTsCdCfWVIkFWUfZNOB", "Content-Type": "application/json"}
             resp = requests.post("https://api.creem.io/v1/checkouts", headers=headers, data=json.dumps(payload))
-            data_json = resp.json() if resp.content else {}
+            data_json = resp.json()
             if 200 == resp.status_code :
                 print(f"Creem创建订单成功: {data_json}")
                 order.save()
@@ -1664,7 +1664,7 @@ def init_router(app: Flask):
                     "message": "订单创建成功",
                     "data": {"orderId": order.trade_no,"check_id":data_json.get('id'), "checkout_url": data_json.get('checkout_url')}
                 })
-            return jsonify({"error": data_json.get('error') or 'Creem创建订单失败'}), 500
+            return jsonify({"error": data_json}), 500
             
         except Exception as e:
             return jsonify({"error": f"创建订单失败: {str(e)}"}), 500
