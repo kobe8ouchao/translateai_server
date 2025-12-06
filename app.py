@@ -1531,12 +1531,12 @@ def init_router(app: Flask):
         try:
             order_id = request.args.get('orderId')
             if not order_id:
-                return jsonify({"error": "订单号不能为空"}), 400
+                return jsonify({"error": "Order ID cannot be empty"}), 400
             
             # 查询订单
             order = Order.objects(order_no=order_id).first()
             if not order:
-                return jsonify({"error": "订单不存在"}), 404
+                return jsonify({"error": "Order not found"}), 404
             
             # 如果订单已支付，直接返回
             if order.status == 'paid':
@@ -1604,11 +1604,11 @@ def init_router(app: Flask):
                         }
                     })
             else:
-                return jsonify({"error": "查询订单状态失败"}), 500
+                return jsonify({"error": "Failed to query order status"}), 500
                 
         except Exception as e:
-            print(f"查询订单失败: {str(e)}")
-            return jsonify({"error": f"查询订单失败: {str(e)}"}), 500
+            print(f"Failed to query order: {str(e)}")
+            return jsonify({"error": f"Failed to query order: {str(e)}"}), 500
             
     @app.route('/create-creem-order', methods=['POST'])
     def create_creem_order():
@@ -1622,18 +1622,18 @@ def init_router(app: Flask):
             email = data.get('email') or ''
             request_id = data.get('requestId') or ''
             if not user_id:
-                return jsonify({"error": "参数不完整"}), 400
+                return jsonify({"error": "Incomplete parameters"}), 400
             user = User.objects(id=ObjectId(user_id)).first()
             if not user:
-                return jsonify({"error": "用户不存在"}), 404
+                return jsonify({"error": "User not found"}), 404
             is_vip = False
             if user.vip == 1 and user.vip_expired_at:
                 is_vip = user.vip_expired_at > datetime.datetime.now()
             amount = float(str(price).replace('$', '').replace(',', '')) if price else 4.99
             if is_vip and amount < 10:
-                return jsonify({"error": "VIP用户无法购买基础套餐，您已拥有专业版订阅", "code": "VIP_RESTRICTION"}), 403
+                return jsonify({"error": "VIP users cannot purchase the basic plan, you already have a professional subscription", "code": "VIP_RESTRICTION"}), 403
             if not plan_name:
-                plan_name = '基础充值'
+                plan_name = 'Basic'
             order_no = f"ORDER_{int(time.time())}_{user_id[-6:]}"
             order = Order(
                 user=user,
@@ -1645,7 +1645,9 @@ def init_router(app: Flask):
                 status='pending'
             )
             order.save()
+            print(f"Creem创建订单成功: {order}")
             product_id = 'prod_XlAma9AGSGBqo6PSLZyyy' if order_type == 'consumption' else 'prod_17TG6tSx0LUkfaXQcDkIMF'
+           
             payload = {
                 "product_id": product_id,
                 "request_id": request_id,
@@ -1666,13 +1668,13 @@ def init_router(app: Flask):
                 order.save()
                 return jsonify({
                     "code": 200,
-                    "message": "订单创建成功",
-                    "data": {"orderId": order.trade_no,"check_id":data_json.get('id'), "checkout_url": data_json.get('checkout_url')}
+                    "message": "Order created successfully",
+                    "data": {"orderId": order_no,"check_id":data_json.get('id'), "checkout_url": data_json.get('checkout_url')}
                 })
             return jsonify({"error": data_json}), 500
             
         except Exception as e:
-            return jsonify({"error": f"创建订单失败: {str(e)}"}), 500
+            return jsonify({"error": f"Failed to create order: {str(e)}"}), 500
 
     @app.route('/check-creem-status', methods=['GET'])
     def check_creem_status():
@@ -1680,18 +1682,22 @@ def init_router(app: Flask):
             check_id = request.args.get('checkId')
             order_id = request.args.get('orderId')
             if not check_id:
-                return jsonify({"error": "订单号不能为空"}), 400
-            url = f"https://api.creem.io/v1/checkouts/{check_id}"
+                return jsonify({"error": "Order ID cannot be empty"}), 400
             headers = {"x-api-key": "creem_1o4YTsCdCfWVIkFWUfZNOB"}
+            url = f"https://api.creem.io/v1/checkouts/?checkout_id={check_id}"
             response = requests.get(url, headers=headers)
+            print(f"Creem查询订单状态: {url},{response.json()}")
             if 200 == response.status_code:
                 data_json = response.json()
                 status_val = data_json.get('status')
                 if status_val == 'completed':
                     # 查询订单
-                    order = Order.objects(trade_no=order_id).first()
+                    order = Order.objects(order_no=order_id).first()
                     if not order:
-                        return jsonify({"error": "订单不存在"}), 404                   
+                        return jsonify({"error": "Order not found"}), 404
+                    order.status = 'paid'
+                    order.paid_at = datetime.datetime.now()
+                    order.save()                   
                     # 更新用户 tokens
                     user = order.user
                     tokens_to_add = calculate_tokens(order.amount, order.plan_name or '')
@@ -1703,11 +1709,11 @@ def init_router(app: Flask):
                         user.vip_expired_at = datetime.datetime.now() + datetime.timedelta(days=30)
                     
                     user.save()
-                    return jsonify({"code": 200, "message": "订单处理成功", "data": {"orderId": order_id, "tokens": tokens_to_add,"status": 'paid'}})
+                    return jsonify({"code": 200, "message": "Order processed successfully", "data": {"orderId": order_id, "tokens": tokens_to_add,"status": 'paid'}})
             
             return jsonify({"code": 200, "data": {"orderId": order_id, "status": status_val or 'pending'}})
         except Exception as e:
-            return jsonify({"error": f"查询订单失败: {str(e)}"}), 500
+            return jsonify({"error": f"Failed to query order: {str(e)}"}), 500
 
     @app.route('/create-stripe-payment-intent', methods=['POST'])
     def create_stripe_payment_intent():
