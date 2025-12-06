@@ -1345,13 +1345,19 @@ def init_router(app: Flask):
             
             # 解析价格
             if price:
-                amount = float(price.replace('$', '').replace(',', ''))
+                amount_usd = float(price.replace('$', '').replace(',', ''))
             else:
                 # 如果没有传价格，根据 order_type 设置默认值 (兼容旧逻辑)
-                amount = 0.99 if order_type == 'consumption' else 49.90
+                amount_usd = 0.99 if order_type == 'consumption' else 49.90
+            
+            # 转换为人民币（汇率 7.2）
+            EXCHANGE_RATE = 7.2
+            amount = round(amount_usd * EXCHANGE_RATE, 2)
+            
+            print(f"价格转换: ${amount_usd} USD -> ¥{amount} CNY (汇率: {EXCHANGE_RATE})")
             
             # Prevent VIP users from purchasing the basic $0.99 plan
-            if is_vip and amount < 10:  # Basic plan is less than $10
+            if is_vip and amount_usd < 10:  # Basic plan is less than $10
                 return jsonify({
                     "error": "VIP用户无法购买基础套餐，您已拥有专业版订阅",
                     "code": "VIP_RESTRICTION"
@@ -1364,14 +1370,14 @@ def init_router(app: Flask):
             # 生成订单号
             order_no = f"ORDER_{int(time.time())}_{user_id[-6:]}"
             
-            # 创建订单记录
+            # 创建订单记录（存储人民币金额）
             order = Order(
                 user=user,
                 order_no=order_no,
-                amount=amount,
+                amount=amount,  # 人民币金额
                 plan_name=plan_name,
                 period=period,
-                type=order_type or ('consumption' if amount < 20 else 'subscription'),
+                type=order_type or ('consumption' if amount_usd < 20 else 'subscription'),
                 status='pending'
             )
             order.save()
