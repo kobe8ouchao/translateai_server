@@ -34,6 +34,7 @@ from alipay.aop.api.request.AlipayTradePagePayRequest import AlipayTradePagePayR
 from alipay.aop.api.domain.AlipayTradeQueryModel import AlipayTradeQueryModel
 from alipay.aop.api.request.AlipayTradeQueryRequest import AlipayTradeQueryRequest
 from db.schema import Order
+from db.schema import OAuthState
 import time
 from alipay.aop.api.util.SignatureUtils import verify_with_rsa
 from supabase import create_client, Client
@@ -65,6 +66,8 @@ import datetime
 
 # Stripe配置
 stripe.api_key = os.getenv('STRIPE_API_KEY', '')  # 替换为你的Stripe密钥
+CREEM_API_KEY = os.getenv('CREEM_API_KEY', '')
+CREEM_API_BASE = os.getenv('CREEM_API_BASE', 'https://api.creem.io')
 
 
 # 跨域
@@ -861,8 +864,9 @@ def init_router(app: Flask):
     def google_auth():
         # 生成随机state参数防止CSRF攻击
         state = secrets.token_hex(16)
-        session['oauth_state'] = state
-        
+        # 改动：存储到MongoDB而不是session
+        OAuthState(state=state).save()
+        print("Generated state:", state)
         # 构建Google OAuth授权URL
         auth_url = "https://accounts.google.com/o/oauth2/v2/auth"
         params = {
@@ -885,10 +889,19 @@ def init_router(app: Flask):
         # 获取授权码和state
         code = request.args.get('code')
         state = request.args.get('state')
-        print(code,state)
         # 验证state防止CSRF攻击
-        if state != session.get('oauth_state'):
+        print("/auth/google/callback - code:", code, "state:", state)
+    
+        # 改动：从MongoDB验证state
+        oauth_state = OAuthState.objects(state=state).first()
+    
+        if not oauth_state:
+            print("ERROR: State not found in database!")
             return jsonify({"error": "Invalid state parameter"}), 400
+    
+        # 验证通过后立即删除，防止重放攻击
+        oauth_state.delete()
+        print("State validated and deleted")
         
         # 使用授权码获取访问令牌
         token_url = "https://oauth2.googleapis.com/token"
@@ -1419,7 +1432,7 @@ def init_router(app: Flask):
 
     def calculate_tokens(amount, plan_name):
         """根据金额和套餐计算 tokens"""
-        # 基础套餐: $0.99 = 10,000 tokens
+        # 基础套餐: $4.99 = 10,000 tokens
         # 专业套餐: $49 = 100,000 tokens
         if not plan_name:
             return int(amount * 1000)
@@ -1472,13 +1485,11 @@ def init_router(app: Flask):
                     # 更新用户额度
                     user = order.user
                     tokens_to_add = calculate_tokens(order.amount, order.plan_name or '')
-                    user.tokens = (user.tokens or 0) + tokens_to_add
-                    
+                    user.tokens = (user.tokens or 0) + tokens_to_add                    
                     # 如果是订阅套餐，更新 VIP
                     if order.type == 'subscription' or 'professional' in (order.plan_name or '').lower():
                         user.vip = 1
-                        user.vip_expired_at = datetime.datetime.now() + datetime.timedelta(days=30)
-                    
+                        user.vip_expired_at = datetime.datetime.now() + datetime.timedelta(days=30)             
                     user.save()
                     
                 return "success"
@@ -1597,6 +1608,105 @@ def init_router(app: Flask):
                 
         except Exception as e:
             print(f"查询订单失败: {str(e)}")
+            return jsonify({"error": f"查询订单失败: {str(e)}"}), 500
+            
+    @app.route('/create-creem-order', methods=['POST'])
+    def create_creem_order():
+        try:
+            data = request.get_json() or {}
+            user_id = data.get('userId')
+            plan_name = data.get('planName')
+            price = data.get('price')
+            period = data.get('period')
+            order_type = data.get('orderType') or 'consumption'
+            email = data.get('email') or ''
+            request_id = data.get('requestId') or ''
+            if not user_id:
+                return jsonify({"error": "参数不完整"}), 400
+            user = User.objects(id=ObjectId(user_id)).first()
+            if not user:
+                return jsonify({"error": "用户不存在"}), 404
+            is_vip = False
+            if user.vip == 1 and user.vip_expired_at:
+                is_vip = user.vip_expired_at > datetime.datetime.now()
+            amount = float(str(price).replace('$', '').replace(',', '')) if price else 4.99
+            if is_vip and amount < 10:
+                return jsonify({"error": "VIP用户无法购买基础套餐，您已拥有专业版订阅", "code": "VIP_RESTRICTION"}), 403
+            if not plan_name:
+                plan_name = '基础充值'
+            order_no = f"ORDER_{int(time.time())}_{user_id[-6:]}"
+            order = Order(
+                user=user,
+                order_no=order_no,
+                amount=amount,
+                plan_name=plan_name,
+                period=period,
+                type=order_type,
+                status='pending'
+            )
+            order.save()
+            product_id = 'prod_XlAma9AGSGBqo6PSLZyyy' if order_type == 'consumption' else 'prod_17TG6tSx0LUkfaXQcDkIMF'
+            payload = {
+                "product_id": product_id,
+                "request_id": request_id,
+                "customer": {
+                    "email": email
+                },
+                "success_url": os.getenv('CREEM_SUCCESS_URL', os.getenv('FRONTEND_URL', 'http://localhost:5173') + '/payment/success'),
+            }
+            if email:
+                payload["customer"] = {"email": email}
+            if request_id:
+                payload["request_id"] = request_id
+            headers = {"x-api-key":"creem_1o4YTsCdCfWVIkFWUfZNOB", "Content-Type": "application/json"}
+            resp = requests.post("https://api.creem.io/v1/checkouts", headers=headers, data=json.dumps(payload))
+            data_json = resp.json()
+            if 200 == resp.status_code :
+                print(f"Creem创建订单成功: {data_json}")
+                order.save()
+                return jsonify({
+                    "code": 200,
+                    "message": "订单创建成功",
+                    "data": {"orderId": order.trade_no,"check_id":data_json.get('id'), "checkout_url": data_json.get('checkout_url')}
+                })
+            return jsonify({"error": data_json}), 500
+            
+        except Exception as e:
+            return jsonify({"error": f"创建订单失败: {str(e)}"}), 500
+
+    @app.route('/check-creem-status', methods=['GET'])
+    def check_creem_status():
+        try:
+            check_id = request.args.get('checkId')
+            order_id = request.args.get('orderId')
+            if not check_id:
+                return jsonify({"error": "订单号不能为空"}), 400
+            url = f"https://api.creem.io/v1/checkouts/{check_id}"
+            headers = {"x-api-key": "creem_1o4YTsCdCfWVIkFWUfZNOB"}
+            response = requests.get(url, headers=headers)
+            if 200 == response.status_code:
+                data_json = response.json()
+                status_val = data_json.get('status')
+                if status_val == 'completed':
+                    # 查询订单
+                    order = Order.objects(trade_no=order_id).first()
+                    if not order:
+                        return jsonify({"error": "订单不存在"}), 404                   
+                    # 更新用户 tokens
+                    user = order.user
+                    tokens_to_add = calculate_tokens(order.amount, order.plan_name or '')
+                    user.tokens = (user.tokens or 0) + tokens_to_add
+                    
+                    # 如果是订阅套餐，更新 VIP 状态
+                    if order.type == 'subscription' or 'professional' in (order.plan_name or '').lower():
+                        user.vip = 1
+                        user.vip_expired_at = datetime.datetime.now() + datetime.timedelta(days=30)
+                    
+                    user.save()
+                    return jsonify({"code": 200, "message": "订单处理成功", "data": {"orderId": order_id, "tokens": tokens_to_add,"status": 'paid'}})
+            
+            return jsonify({"code": 200, "data": {"orderId": order_id, "status": status_val or 'pending'}})
+        except Exception as e:
             return jsonify({"error": f"查询订单失败: {str(e)}"}), 500
 
     @app.route('/create-stripe-payment-intent', methods=['POST'])
